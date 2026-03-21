@@ -1,0 +1,60 @@
+package cmd
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+)
+
+var version = "0.1.0"
+
+var rootCmd = &cobra.Command{
+	Use:   "lore",
+	Short: "Loremaster — declarative AI skill syncer",
+	Long:  "Loremaster syncs AI coding skills from git repos into your project's tool-specific skill directories.",
+}
+
+func init() {
+	rootCmd.Version = version
+	rootCmd.SetVersionTemplate("lore version {{.Version}}\n")
+
+	completionCmd := &cobra.Command{
+		Use:   "completion",
+		Short: "Generate shell completion scripts",
+	}
+
+	completionCmd.AddCommand(&cobra.Command{
+		Use:   "bash",
+		Short: "Generate bash completion script",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return rootCmd.GenBashCompletionV2(os.Stdout, true)
+		},
+	})
+
+	completionCmd.AddCommand(&cobra.Command{
+		Use:   "zsh",
+		Short: "Generate zsh completion script",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return rootCmd.GenZshCompletion(os.Stdout)
+		},
+	})
+
+	completionCmd.AddCommand(&cobra.Command{
+		Use:   "fish",
+		Short: "Generate fish completion script",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return rootCmd.GenFishCompletion(os.Stdout, true)
+		},
+	})
+
+	rootCmd.AddCommand(completionCmd)
+}
+
+func Execute() error {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return err
+	}
+	return nil
+}
