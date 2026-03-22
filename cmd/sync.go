@@ -53,7 +53,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 
 	syncer := &loresync.Syncer{
-		GitFetcher:  &git.GoGitFetcher{},
+		GitFetcher:  &git.ExecGitFetcher{},
 		Provider:    prov,
 		ProjectRoot: projectRoot,
 	}

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -18,6 +17,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.Version = version
 	rootCmd.SetVersionTemplate("lore version {{.Version}}\n")
+	rootCmd.SilenceUsage = true
 
 	completionCmd := &cobra.Command{
 		Use:   "completion",
@@ -52,9 +52,5 @@ func init() {
 }
 
 func Execute() error {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return err
-	}
-	return nil
+	return rootCmd.Execute()
 }

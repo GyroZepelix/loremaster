@@ -38,15 +38,31 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if len(detected) == 0 {
-		return fmt.Errorf("no supported AI tool detected (looked for .claude/, .opencode/)")
-	}
-
 	var selected provider.Provider
 
-	if len(detected) == 1 {
+	switch len(detected) {
+	case 1:
 		selected = detected[0]
-	} else {
+	case 0:
+		// No provider directories found — let user choose which to set up
+		all := provider.All()
+		fmt.Println("No AI tool directory detected. Select a provider to initialize:")
+		for i, p := range all {
+			fmt.Printf("  [%d] %s\n", i+1, p.Name())
+		}
+		fmt.Print("Choice: ")
+		var choice int
+		if _, err := fmt.Scanf("%d", &choice); err != nil || choice < 1 || choice > len(all) {
+			return fmt.Errorf("invalid selection")
+		}
+		selected = all[choice-1]
+
+		// Create the provider's marker directory
+		markerPath := filepath.Join(cwd, selected.MarkerDir())
+		if err := os.MkdirAll(markerPath, 0755); err != nil {
+			return fmt.Errorf("create %s directory: %w", selected.MarkerDir(), err)
+		}
+	default:
 		// Multiple providers — prompt user
 		fmt.Println("Multiple AI tools detected. Select a provider:")
 		for i, p := range detected {
