@@ -55,10 +55,10 @@ flowchart LR
 ### go install (recommended)
 
 ```bash
-go install github.com/GyroZepelix/loremaster@latest
+go install github.com/GyroZepelix/loremaster/cmd/lore@latest
 ```
 
-This installs the `loremaster` binary to your `$GOBIN` (defaults to `$GOPATH/bin` or `~/go/bin`). Make sure it's on your `$PATH`.
+This installs the `lore` binary to your `$GOBIN` (defaults to `$GOPATH/bin` or `~/go/bin`). Make sure it's on your `$PATH`.
 
 ### Build from source
 
@@ -177,7 +177,9 @@ go build -o lore .
 ### Project Structure
 
 ```text
-cmd/                CLI commands (init, sync, completion)
+cmd/
+  lore/             Main entry point (go install target)
+  *.go              CLI commands (init, sync, completion)
 internal/
   config/           YAML parsing and validation
   provider/         Tool-specific path resolution and detection
