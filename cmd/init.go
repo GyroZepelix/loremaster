@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dgjalic/loremaster/internal/config"
-	"github.com/dgjalic/loremaster/internal/provider"
+	"github.com/GyroZepelix/loremaster/internal/config"
+	"github.com/GyroZepelix/loremaster/internal/provider"
 	"github.com/spf13/cobra"
 )
 

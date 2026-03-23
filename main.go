@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/dgjalic/loremaster/cmd"
+	"github.com/GyroZepelix/loremaster/cmd"
 )
 
 func main() {

@@ -5,10 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dgjalic/loremaster/internal/config"
-	"github.com/dgjalic/loremaster/internal/git"
-	"github.com/dgjalic/loremaster/internal/provider"
-	loresync "github.com/dgjalic/loremaster/internal/sync"
+	"github.com/GyroZepelix/loremaster/internal/config"
+	"github.com/GyroZepelix/loremaster/internal/git"
+	"github.com/GyroZepelix/loremaster/internal/provider"
+	loresync "github.com/GyroZepelix/loremaster/internal/sync"
 	"github.com/spf13/cobra"
 )
 

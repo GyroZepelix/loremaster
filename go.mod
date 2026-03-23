@@ -1,4 +1,4 @@
-module github.com/dgjalic/loremaster
+module github.com/GyroZepelix/loremaster
 
 go 1.24.0
 

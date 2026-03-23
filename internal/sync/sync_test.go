@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgjalic/loremaster/internal/config"
-	loregit "github.com/dgjalic/loremaster/internal/git"
-	"github.com/dgjalic/loremaster/internal/provider"
+	"github.com/GyroZepelix/loremaster/internal/config"
+	loregit "github.com/GyroZepelix/loremaster/internal/git"
+	"github.com/GyroZepelix/loremaster/internal/provider"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )

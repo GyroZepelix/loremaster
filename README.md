@@ -53,7 +53,7 @@ flowchart LR
 **Requirements:** Go 1.24+
 
 ```bash
-git clone https://github.com/dgjalic/loremaster.git
+git clone https://github.com/GyroZepelix/loremaster.git
 cd loremaster
 go build -o lore .
 ```

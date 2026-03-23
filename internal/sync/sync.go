@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dgjalic/loremaster/internal/cache"
-	"github.com/dgjalic/loremaster/internal/config"
-	"github.com/dgjalic/loremaster/internal/git"
-	"github.com/dgjalic/loremaster/internal/gitignore"
-	"github.com/dgjalic/loremaster/internal/provider"
+	"github.com/GyroZepelix/loremaster/internal/cache"
+	"github.com/GyroZepelix/loremaster/internal/config"
+	"github.com/GyroZepelix/loremaster/internal/git"
+	"github.com/GyroZepelix/loremaster/internal/gitignore"
+	"github.com/GyroZepelix/loremaster/internal/provider"
 )
 
 type Syncer struct {
