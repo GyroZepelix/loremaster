@@ -2,7 +2,7 @@
 
 ![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPL--2.0-blue)
-![Version](https://img.shields.io/badge/version-0.1.0-green)
+![Version](https://img.shields.io/badge/version-0.1.1-green)
 
 Declarative skill syncer for AI coding tools. Define your skills in a manifest, fetch them from git repos, and symlink them into your project — no manual copying, no git leakage.
 
@@ -51,6 +51,16 @@ flowchart LR
 ## Installation
 
 **Requirements:** Go 1.24+
+
+### go install (recommended)
+
+```bash
+go install github.com/GyroZepelix/loremaster@latest
+```
+
+This installs the `loremaster` binary to your `$GOBIN` (defaults to `$GOPATH/bin` or `~/go/bin`). Make sure it's on your `$PATH`.
+
+### Build from source
 
 ```bash
 git clone https://github.com/GyroZepelix/loremaster.git
