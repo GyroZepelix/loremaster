@@ -94,7 +94,15 @@ lore sync
 
 ## Configuration
 
-`lore.yml` lives in your project root, `.claude/`, `.opencode/`, or `~/` (global fallback). Loremaster searches upward from the current directory.
+`lore.yml` can live in your project root, `.claude/`, or `.opencode/`. Loremaster searches these locations relative to the current directory via `Locate()`.
+
+### Scope
+
+**Project scope** — Place `lore.yml` at the project root or inside `.claude/lore.yml` / `.opencode/lore.yml`. Run `lore sync` from the project directory.
+
+**Global scope** — Place `lore.yml` at `~/lore.yml` or `~/.claude/lore.yml` and run `lore sync` from `~`. The recommended location is `~/.claude/lore.yml` to keep your home directory clean. There is no automatic `~/` fallback — global scope works because `Locate()` searches relative to the directory you invoke `lore sync` from.
+
+Note: there is no config merging between project and global. Each `lore sync` invocation uses exactly one `lore.yml`. If no `lore.yml` is found in any of the search locations, `lore sync` exits with an error.
 
 ### Schema
 

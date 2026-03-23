@@ -53,14 +53,15 @@ func (s *Syncer) Sync(cfg *config.Config) (*SyncResult, error) {
 
 	result := &SyncResult{Sources: len(cfg.Skills)}
 	var syncedEntries []string
-	var syncErrors []error
 
 	for _, src := range cfg.Skills {
-		if err := s.syncSource(src, &syncedEntries); err != nil {
-			errMsg := fmt.Sprintf("error: sync failed for source %q: %s", src.Source, err)
-			result.Errors = append(result.Errors, errMsg)
-			syncErrors = append(syncErrors, fmt.Errorf("%s", errMsg))
+		skillErrors, err := s.syncSource(src, &syncedEntries)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("error: sync failed for source %q: %s", src.Source, err))
 			continue
+		}
+		for _, skillErr := range skillErrors {
+			result.Errors = append(result.Errors, skillErr)
 		}
 	}
 
@@ -85,14 +86,14 @@ func (s *Syncer) Sync(cfg *config.Config) (*SyncResult, error) {
 		}
 	}
 
-	if len(syncErrors) > 0 {
-		return result, fmt.Errorf("sync completed with %d error(s)", len(syncErrors))
+	if len(result.Errors) > 0 {
+		return result, fmt.Errorf("sync completed with %d error(s)", len(result.Errors))
 	}
 
 	return result, nil
 }
 
-func (s *Syncer) syncSource(src config.SkillSource, syncedEntries *[]string) error {
+func (s *Syncer) syncSource(src config.SkillSource, syncedEntries *[]string) ([]string, error) {
 	isGit := config.IsGitSource(src.Source)
 
 	var baseDir string
@@ -100,14 +101,14 @@ func (s *Syncer) syncSource(src config.SkillSource, syncedEntries *[]string) err
 	if isGit {
 		repoDir, err := cache.RepoDir(src.Source)
 		if err != nil {
-			return fmt.Errorf("resolve cache dir: %w (check $HOME or $XDG_DATA_HOME)", err)
+			return nil, fmt.Errorf("resolve cache dir: %w (check $HOME or $XDG_DATA_HOME)", err)
 		}
 		if err := s.GitFetcher.CloneOrPull(src.Source, repoDir); err != nil {
-			return fmt.Errorf("%w (check URL and authentication)", err)
+			return nil, fmt.Errorf("%w (check URL and authentication)", err)
 		}
 		if src.Ref != "" {
 			if err := s.GitFetcher.Checkout(repoDir, src.Ref); err != nil {
-				return fmt.Errorf("checkout ref %q: %w (verify ref exists in remote)", src.Ref, err)
+				return nil, fmt.Errorf("checkout ref %q: %w (verify ref exists in remote)", src.Ref, err)
 			}
 		}
 		baseDir = repoDir
@@ -115,11 +116,11 @@ func (s *Syncer) syncSource(src config.SkillSource, syncedEntries *[]string) err
 		// Local source — resolve to absolute path
 		absSource, err := filepath.Abs(src.Source)
 		if err != nil {
-			return fmt.Errorf("resolve local path %q: %w (check path syntax)", src.Source, err)
+			return nil, fmt.Errorf("resolve local path %q: %w (check path syntax)", src.Source, err)
 		}
 		info, err := os.Stat(absSource)
 		if err != nil || !info.IsDir() {
-			return fmt.Errorf("local path %q does not exist or is not a directory (check path in lore.yml)", src.Source)
+			return nil, fmt.Errorf("local path %q does not exist or is not a directory (check path in lore.yml)", src.Source)
 		}
 		baseDir = absSource
 	}
@@ -129,16 +130,19 @@ func (s *Syncer) syncSource(src config.SkillSource, syncedEntries *[]string) err
 		linkType = "soft"
 	}
 
+	var skillErrors []string
 	for _, skill := range src.Include {
 		srcPath := filepath.Join(baseDir, skill)
 		if info, err := os.Stat(srcPath); err != nil || !info.IsDir() {
-			return fmt.Errorf("skill %q not found in source (expected directory at %q, verify include list)", skill, srcPath)
+			skillErrors = append(skillErrors, fmt.Sprintf("error: skill %q from source %q: not found (expected directory at %q, verify include list)", skill, src.Source, srcPath))
+			continue
 		}
 
 		dstPath := s.Provider.SkillDir(s.ProjectRoot, skill)
 
 		if err := LinkSkill(srcPath, dstPath, linkType); err != nil {
-			return fmt.Errorf("link skill %q: %w (check filesystem permissions)", skill, err)
+			skillErrors = append(skillErrors, fmt.Sprintf("error: skill %q from source %q: %s (check filesystem permissions)", skill, src.Source, err))
+			continue
 		}
 
 		// Compute gitignore entry relative to project root
@@ -146,7 +150,7 @@ func (s *Syncer) syncSource(src config.SkillSource, syncedEntries *[]string) err
 		*syncedEntries = append(*syncedEntries, relPath)
 	}
 
-	return nil
+	return skillErrors, nil
 }
 
 func (s *Syncer) reconcileStale(desiredSkills map[string]bool) ([]string, error) {

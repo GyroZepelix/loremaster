@@ -14,7 +14,9 @@ import (
 func LinkSkill(src string, dst string, linkType string) error {
 	if linkType == "soft" {
 		// Remove existing destination (symlink or directory)
-		os.RemoveAll(dst)
+		if err := os.RemoveAll(dst); err != nil {
+			return fmt.Errorf("remove existing %q: %w", dst, err)
+		}
 
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
@@ -31,15 +33,26 @@ func LinkSkill(src string, dst string, linkType string) error {
 	checksumFile := filepath.Join(dst, ".lore-checksum")
 
 	if _, err := os.Stat(dst); err == nil {
-		// Destination exists — check for local modifications
-		if storedChecksum, err := os.ReadFile(checksumFile); err == nil {
-			currentChecksum, err := ComputeDirChecksum(dst)
-			if err == nil && strings.TrimSpace(string(storedChecksum)) != currentChecksum {
-				fmt.Fprintf(os.Stderr, "warning: skipping %q: local modifications detected\n", dst)
-				return nil
-			}
+		// Destination exists — check if managed by loremaster
+		storedChecksum, readErr := os.ReadFile(checksumFile)
+		if readErr != nil {
+			// No .lore-checksum — not managed by loremaster, skip to prevent data loss
+			fmt.Fprintf(os.Stderr, "warning: skipping %q: directory exists but is not managed by loremaster (no .lore-checksum found). Remove it manually to allow sync.\n", dst)
+			return nil
 		}
-		os.RemoveAll(dst)
+		// Managed — check for local modifications
+		currentChecksum, err := ComputeDirChecksum(dst)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %q: could not verify checksum: %s\n", dst, err)
+			return nil
+		}
+		if strings.TrimSpace(string(storedChecksum)) != currentChecksum {
+			fmt.Fprintf(os.Stderr, "warning: skipping %q: local modifications detected\n", dst)
+			return nil
+		}
+		if err := os.RemoveAll(dst); err != nil {
+			return fmt.Errorf("remove existing %q: %w", dst, err)
+		}
 	}
 
 	// Ensure parent directory exists

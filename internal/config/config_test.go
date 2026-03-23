@@ -108,6 +108,11 @@ skills:
 			wantErr: "must be a simple directory name",
 		},
 		{
+			name:    "SCP-style URL with port",
+			input:   "provider: claude\nskills:\n  - source: git@github.com:2222/user/repo.git\n    include: [a]\n",
+			wantErr: "SCP-style URLs",
+		},
+		{
 			name:  "type defaults to soft",
 			input: "provider: claude\nskills:\n  - source: x\n    include: [a]\n",
 			check: func(t *testing.T, cfg *Config) {

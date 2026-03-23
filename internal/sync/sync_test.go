@@ -284,6 +284,55 @@ func TestSync_FailedSource_ContinuesOthers(t *testing.T) {
 	}
 }
 
+func TestSync_PerSkillIsolation(t *testing.T) {
+	projectDir, prov := setupTestProject(t)
+	srcDir := createLocalSource(t, t.TempDir(), "good-skill", "another-good")
+	// "missing-skill" is not created in the source
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	syncer := &Syncer{
+		GitFetcher:  &mockFetcher{},
+		Provider:    prov,
+		ProjectRoot: projectDir,
+	}
+
+	cfg := &config.Config{
+		Provider: "claude",
+		Skills: []config.SkillSource{
+			{Source: srcDir, Include: []string{"good-skill", "missing-skill", "another-good"}, Type: "soft"},
+		},
+	}
+
+	result, err := syncer.Sync(cfg)
+	if err == nil {
+		t.Fatal("expected error for missing skill")
+	}
+	if result.Synced != 2 {
+		t.Errorf("synced = %d, want 2 (good-skill + another-good)", result.Synced)
+	}
+	if len(result.Errors) != 1 {
+		t.Errorf("errors = %d, want 1 (missing-skill)", len(result.Errors))
+	}
+
+	// Verify both good skills were synced
+	for _, skill := range []string{"good-skill", "another-good"} {
+		skillPath := filepath.Join(projectDir, ".claude", "skills", skill)
+		if _, err := os.Lstat(skillPath); err != nil {
+			t.Errorf("skill %q not synced despite missing-skill failing", skill)
+		}
+	}
+
+	// Verify gitignore has both good skills
+	gitignoreContent, _ := os.ReadFile(filepath.Join(projectDir, ".gitignore"))
+	s := string(gitignoreContent)
+	if !containsLine(s, ".claude/skills/good-skill") {
+		t.Error("gitignore missing good-skill")
+	}
+	if !containsLine(s, ".claude/skills/another-good") {
+		t.Error("gitignore missing another-good")
+	}
+}
+
 func TestSync_StaleReconciliation(t *testing.T) {
 	projectDir, prov := setupTestProject(t)
 	srcDir := createLocalSource(t, t.TempDir(), "keep-skill", "remove-skill")

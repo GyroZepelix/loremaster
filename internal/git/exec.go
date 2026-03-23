@@ -44,8 +44,10 @@ func (e *ExecGitFetcher) CloneOrPull(url string, targetDir string) error {
 }
 
 func (e *ExecGitFetcher) Checkout(repoDir string, ref string) error {
-	// Fetch latest refs first
-	_ = runGit("-C", repoDir, "fetch", "origin")
+	// Fetch latest refs first; warn but don't fail (preserves offline-with-warm-cache)
+	if err := runGit("-C", repoDir, "fetch", "origin"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: fetch failed for %q: %s — using cached refs\n", repoDir, err)
+	}
 
 	if err := runGit("-C", repoDir, "checkout", ref); err != nil {
 		return fmt.Errorf("checkout ref %q: %w", ref, err)
@@ -55,7 +57,6 @@ func (e *ExecGitFetcher) Checkout(repoDir string, ref string) error {
 
 func runGit(args ...string) error {
 	cmd := exec.Command("git", args...)
-	cmd.Stderr = nil // capture stderr in error
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(output))

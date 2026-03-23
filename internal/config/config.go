@@ -3,10 +3,16 @@ package config
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// scpPortPattern matches SCP-style SSH URLs where a port number is mistakenly
+// embedded in the path (e.g. git@host:2222/path). The SCP format doesn't
+// support ports — the user should use ssh://git@host:2222/path instead.
+var scpPortPattern = regexp.MustCompile(`^git@([^:]+):(\d+)/`)
 
 type Config struct {
 	Provider string        `yaml:"provider"`
@@ -54,6 +60,11 @@ func Parse(r io.Reader) (*Config, error) {
 			if err := validateSkillName(skill); err != nil {
 				return nil, fmt.Errorf("skills[%d]: %w", i, err)
 			}
+		}
+		if m := scpPortPattern.FindStringSubmatch(s.Source); m != nil {
+			// Extract the remaining path after the port match
+			rest := strings.TrimPrefix(s.Source, m[0])
+			return nil, fmt.Errorf("skills[%d]: source %q looks like it contains a port number — SCP-style URLs (git@host:path) don't support ports; use ssh://git@%s:%s/%s instead", i, s.Source, m[1], m[2], rest)
 		}
 		if s.Type == "" {
 			s.Type = "soft"

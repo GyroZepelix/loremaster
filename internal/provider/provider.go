@@ -5,7 +5,6 @@ import "fmt"
 type Provider interface {
 	Name() string
 	SkillDir(projectRoot string, skillName string) string
-	GlobalSkillDir(skillName string) string
 	MarkerDir() string
 }
 
