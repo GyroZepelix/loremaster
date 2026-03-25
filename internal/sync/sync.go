@@ -27,7 +27,7 @@ type SyncResult struct {
 
 func (s *Syncer) Sync(cfg *config.Config) (*SyncResult, error) {
 	if s.Provider == nil {
-		prov, err := provider.Get(cfg.Provider)
+		prov, err := provider.Get(cfg.Providers[0])
 		if err != nil {
 			return nil, err
 		}

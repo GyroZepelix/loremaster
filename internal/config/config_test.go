@@ -23,8 +23,8 @@ skills:
     include: [foo]
 `,
 			check: func(t *testing.T, cfg *Config) {
-				if cfg.Provider != "claude" {
-					t.Errorf("provider = %q, want claude", cfg.Provider)
+				if len(cfg.Providers) != 1 || cfg.Providers[0] != "claude" {
+					t.Errorf("providers = %v, want [claude]", cfg.Providers)
 				}
 				if len(cfg.Skills) != 1 {
 					t.Fatalf("skills len = %d, want 1", len(cfg.Skills))
@@ -48,8 +48,8 @@ skills:
     type: soft
 `,
 			check: func(t *testing.T, cfg *Config) {
-				if cfg.Provider != "opencode" {
-					t.Errorf("provider = %q, want opencode", cfg.Provider)
+				if len(cfg.Providers) != 1 || cfg.Providers[0] != "opencode" {
+					t.Errorf("providers = %v, want [opencode]", cfg.Providers)
 				}
 				if len(cfg.Skills) != 2 {
 					t.Fatalf("skills len = %d, want 2", len(cfg.Skills))
@@ -62,13 +62,73 @@ skills:
 				}
 			},
 		},
+		// --- Provider parsing (AC 1-6, 15) ---
+		{
+			name: "scalar provider backward compat",
+			input: `
+provider: claude
+skills:
+  - source: git@github.com:user/repo.git
+    include: [foo]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				if len(cfg.Providers) != 1 || cfg.Providers[0] != "claude" {
+					t.Errorf("providers = %v, want [claude]", cfg.Providers)
+				}
+			},
+		},
+		{
+			name: "list provider multi-provider",
+			input: `
+provider: [claude, opencode]
+skills:
+  - source: git@github.com:user/repo.git
+    include: [foo]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				want := []string{"claude", "opencode"}
+				if len(cfg.Providers) != len(want) {
+					t.Fatalf("providers = %v, want %v", cfg.Providers, want)
+				}
+				for i, w := range want {
+					if cfg.Providers[i] != w {
+						t.Errorf("providers[%d] = %q, want %q", i, cfg.Providers[i], w)
+					}
+				}
+			},
+		},
+		{
+			name:    "duplicate provider",
+			input:   "provider: [claude, claude]\nskills:\n  - source: x\n    include: [a]\n",
+			wantErr: "duplicate provider",
+		},
+		{
+			name:    "empty provider list",
+			input:   "provider: []\nskills:\n  - source: x\n    include: [a]\n",
+			wantErr: "missing required field: provider",
+		},
+		{
+			name:    "null provider",
+			input:   "provider:\nskills:\n  - source: x\n    include: [a]\n",
+			wantErr: "missing required field: provider",
+		},
+		{
+			name:    "mapping provider rejected",
+			input:   "provider: {foo: bar}\nskills:\n  - source: x\n    include: [a]\n",
+			wantErr: "invalid provider type",
+		},
+		{
+			name:    "invalid provider in list",
+			input:   "provider: [unknown]\nskills:\n  - source: x\n    include: [a]\n",
+			wantErr: "invalid provider",
+		},
 		{
 			name:    "missing provider",
 			input:   "skills:\n  - source: x\n    include: [a]\n",
 			wantErr: "missing required field: provider",
 		},
 		{
-			name:    "invalid provider",
+			name:    "invalid provider scalar",
 			input:   "provider: cursor\nskills:\n  - source: x\n    include: [a]\n",
 			wantErr: "invalid provider",
 		},
@@ -92,20 +152,142 @@ skills:
 			input:   "provider: claude\nskills:\n  - source: x\n    include: [a]\n    type: link\n",
 			wantErr: "invalid type",
 		},
+		// --- Include path parsing (AC 7-10, 13) ---
 		{
-			name:    "skill name with path separator",
-			input:   "provider: claude\nskills:\n  - source: x\n    include: [../../.ssh]\n",
-			wantErr: "must not contain path separators",
+			name: "include path with slash is valid",
+			input: `
+provider: claude
+skills:
+  - source: git@github.com:user/repo.git
+    include: [loa/brainstorm]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				if len(cfg.Skills[0].ParsedIncludes) != 1 {
+					t.Fatalf("ParsedIncludes len = %d, want 1", len(cfg.Skills[0].ParsedIncludes))
+				}
+				e := cfg.Skills[0].ParsedIncludes[0]
+				if e.Src != "loa/brainstorm" || e.Dst != "loa/brainstorm" {
+					t.Errorf("ParsedIncludes[0] = {%q, %q}, want {loa/brainstorm, loa/brainstorm}", e.Src, e.Dst)
+				}
+			},
 		},
 		{
-			name:    "skill name with dot-dot",
+			name: "include path with colon mapping",
+			input: `
+provider: claude
+skills:
+  - source: git@github.com:user/repo.git
+    include: ["deep/skill:my-tool"]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				if len(cfg.Skills[0].ParsedIncludes) != 1 {
+					t.Fatalf("ParsedIncludes len = %d, want 1", len(cfg.Skills[0].ParsedIncludes))
+				}
+				e := cfg.Skills[0].ParsedIncludes[0]
+				if e.Src != "deep/skill" || e.Dst != "my-tool" {
+					t.Errorf("ParsedIncludes[0] = {%q, %q}, want {deep/skill, my-tool}", e.Src, e.Dst)
+				}
+			},
+		},
+		{
+			name: "ParsedIncludes populated for multiple includes",
+			input: `
+provider: claude
+skills:
+  - source: git@github.com:user/repo.git
+    include: [alpha, beta, gamma]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				if len(cfg.Skills[0].ParsedIncludes) != 3 {
+					t.Fatalf("ParsedIncludes len = %d, want 3", len(cfg.Skills[0].ParsedIncludes))
+				}
+				want := []string{"alpha", "beta", "gamma"}
+				for i, w := range want {
+					if cfg.Skills[0].ParsedIncludes[i].Src != w {
+						t.Errorf("ParsedIncludes[%d].Src = %q, want %q", i, cfg.Skills[0].ParsedIncludes[i].Src, w)
+					}
+				}
+			},
+		},
+		{
+			name: "intra-source overlap detected",
+			input: `
+provider: claude
+skills:
+  - source: git@github.com:user/repo.git
+    include: ["a/b:target", "c/d:target"]
+`,
+			wantErr: "duplicate include destination",
+		},
+		{
+			name:    "dot-dot include rejected",
 			input:   "provider: claude\nskills:\n  - source: x\n    include: [..]\n",
-			wantErr: "must be a simple directory name",
+			wantErr: "must not escape root",
+		},
+		// --- Same-URL-different-ref (AC 11-12) ---
+		{
+			name: "same git URL different refs error",
+			input: `
+provider: claude
+skills:
+  - source: git@github.com:user/repo.git
+    ref: v1.0
+    include: [foo]
+  - source: git@github.com:user/repo.git
+    ref: v2.0
+    include: [bar]
+`,
+			wantErr: "same source",
 		},
 		{
-			name:    "skill name is dot",
-			input:   "provider: claude\nskills:\n  - source: x\n    include: [.]\n",
-			wantErr: "must be a simple directory name",
+			name: "same git URL same ref is valid",
+			input: `
+provider: claude
+skills:
+  - source: git@github.com:user/repo.git
+    ref: v1.0
+    include: [foo]
+  - source: git@github.com:user/repo.git
+    ref: v1.0
+    include: [bar]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				if len(cfg.Skills) != 2 {
+					t.Fatalf("skills len = %d, want 2", len(cfg.Skills))
+				}
+			},
+		},
+		{
+			name: "same git URL both empty ref is valid",
+			input: `
+provider: claude
+skills:
+  - source: git@github.com:user/repo.git
+    include: [foo]
+  - source: git@github.com:user/repo.git
+    include: [bar]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				if len(cfg.Skills) != 2 {
+					t.Fatalf("skills len = %d, want 2", len(cfg.Skills))
+				}
+			},
+		},
+		{
+			name: "local sources with same path different content is valid",
+			input: `
+provider: claude
+skills:
+  - source: /home/user/skills
+    include: [foo]
+  - source: /home/user/skills
+    include: [bar]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				if len(cfg.Skills) != 2 {
+					t.Fatalf("skills len = %d, want 2", len(cfg.Skills))
+				}
+			},
 		},
 		{
 			name:    "SCP-style URL with port",

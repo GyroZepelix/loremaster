@@ -47,7 +47,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Resolve project root from config path
 	projectRoot := resolveProjectRoot(configPath)
 
-	prov, err := provider.Get(cfg.Provider)
+	prov, err := provider.Get(cfg.Providers[0])
 	if err != nil {
 		return err
 	}

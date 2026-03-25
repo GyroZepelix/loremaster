@@ -72,7 +72,7 @@ func TestSync_LocalSource_Symlink(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: srcDir, Include: []string{"foo", "bar"}, Type: "soft"},
 		},
@@ -132,7 +132,7 @@ func TestSync_GitSource(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{
 				Source:  "git@github.com:user/repo.git",
@@ -170,7 +170,7 @@ func TestSync_HardCopy(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: srcDir, Include: []string{"my-skill"}, Type: "hard"},
 		},
@@ -220,7 +220,7 @@ func TestSync_HardCopy_LocalModifications(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: srcDir, Include: []string{"my-skill"}, Type: "hard"},
 		},
@@ -259,7 +259,7 @@ func TestSync_FailedSource_ContinuesOthers(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: "git@github.com:bad/repo.git", Include: []string{"bad-skill"}, Type: "soft"},
 			{Source: srcDir, Include: []string{"good-skill"}, Type: "soft"},
@@ -297,7 +297,7 @@ func TestSync_PerSkillIsolation(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: srcDir, Include: []string{"good-skill", "missing-skill", "another-good"}, Type: "soft"},
 		},
@@ -347,7 +347,7 @@ func TestSync_StaleReconciliation(t *testing.T) {
 
 	// First sync with both skills
 	cfg1 := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: srcDir, Include: []string{"keep-skill", "remove-skill"}, Type: "soft"},
 		},
@@ -366,7 +366,7 @@ func TestSync_StaleReconciliation(t *testing.T) {
 
 	// Second sync without remove-skill
 	cfg2 := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: srcDir, Include: []string{"keep-skill"}, Type: "soft"},
 		},
@@ -394,7 +394,7 @@ func TestSync_Idempotent(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: srcDir, Include: []string{"my-skill"}, Type: "soft"},
 		},
@@ -453,7 +453,7 @@ func TestSync_Integration_FullFlow(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: repoPath, Include: []string{"skill-alpha", "skill-beta"}, Type: "soft"},
 		},
@@ -488,7 +488,7 @@ func TestSync_Integration_FullFlow(t *testing.T) {
 
 	// Remove one skill from config, re-sync
 	cfg2 := &config.Config{
-		Provider: "claude",
+		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
 			{Source: repoPath, Include: []string{"skill-alpha"}, Type: "soft"},
 		},
