@@ -59,6 +59,25 @@ func createLocalSource(t *testing.T, dir string, skills ...string) string {
 	return srcDir
 }
 
+// buildBaseDirs constructs a baseDirs map for local sources used in tests.
+func buildBaseDirs(sources ...string) map[string]string {
+	baseDirs := make(map[string]string)
+	for _, src := range sources {
+		abs, _ := filepath.Abs(src)
+		baseDirs[src] = abs
+	}
+	return baseDirs
+}
+
+// parsedIncludes creates ParsedIncludes from Include strings for test configs.
+func parsedIncludes(includes []string) []config.IncludeEntry {
+	var entries []config.IncludeEntry
+	for _, inc := range includes {
+		entries = append(entries, config.IncludeEntry{Src: inc, Dst: inc})
+	}
+	return entries
+}
+
 func TestSync_LocalSource_Symlink(t *testing.T) {
 	projectDir, prov := setupTestProject(t)
 	srcDir := createLocalSource(t, t.TempDir(), "foo", "bar")
@@ -71,14 +90,16 @@ func TestSync_LocalSource_Symlink(t *testing.T) {
 		ProjectRoot: projectDir,
 	}
 
+	includes := []string{"foo", "bar"}
 	cfg := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: srcDir, Include: []string{"foo", "bar"}, Type: "soft"},
+			{Source: srcDir, Include: includes, Type: "soft", ParsedIncludes: parsedIncludes(includes)},
 		},
 	}
 
-	result, err := syncer.Sync(cfg)
+	baseDirs := buildBaseDirs(srcDir)
+	result, err := syncer.Sync(cfg, baseDirs)
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -125,25 +146,35 @@ func TestSync_GitSource(t *testing.T) {
 		},
 	}
 
+	gitURL := "git@github.com:user/repo.git"
+	includes := []string{"skill-a", "skill-b"}
+
+	cfg := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills: []config.SkillSource{
+			{
+				Source:         gitURL,
+				Ref:            "main",
+				Include:        includes,
+				Type:           "soft",
+				ParsedIncludes: parsedIncludes(includes),
+			},
+		},
+	}
+
+	// Use FetchSources to get baseDirs (tests the two-phase flow)
+	baseDirs, fetchErrs := FetchSources(fetcher, cfg.Skills)
+	if len(fetchErrs) > 0 {
+		t.Fatalf("FetchSources errors: %v", fetchErrs)
+	}
+
 	syncer := &Syncer{
 		GitFetcher:  fetcher,
 		Provider:    prov,
 		ProjectRoot: projectDir,
 	}
 
-	cfg := &config.Config{
-		Providers: config.ProviderList{"claude"},
-		Skills: []config.SkillSource{
-			{
-				Source:  "git@github.com:user/repo.git",
-				Ref:    "main",
-				Include: []string{"skill-a", "skill-b"},
-				Type:   "soft",
-			},
-		},
-	}
-
-	result, err := syncer.Sync(cfg)
+	result, err := syncer.Sync(cfg, baseDirs)
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -169,14 +200,16 @@ func TestSync_HardCopy(t *testing.T) {
 		ProjectRoot: projectDir,
 	}
 
+	includes := []string{"my-skill"}
 	cfg := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: srcDir, Include: []string{"my-skill"}, Type: "hard"},
+			{Source: srcDir, Include: includes, Type: "hard", ParsedIncludes: parsedIncludes(includes)},
 		},
 	}
 
-	result, err := syncer.Sync(cfg)
+	baseDirs := buildBaseDirs(srcDir)
+	result, err := syncer.Sync(cfg, baseDirs)
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -219,22 +252,25 @@ func TestSync_HardCopy_LocalModifications(t *testing.T) {
 		ProjectRoot: projectDir,
 	}
 
+	includes := []string{"my-skill"}
 	cfg := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: srcDir, Include: []string{"my-skill"}, Type: "hard"},
+			{Source: srcDir, Include: includes, Type: "hard", ParsedIncludes: parsedIncludes(includes)},
 		},
 	}
 
+	baseDirs := buildBaseDirs(srcDir)
+
 	// First sync
-	syncer.Sync(cfg)
+	syncer.Sync(cfg, baseDirs)
 
 	// Modify the copied skill
 	skillPath := filepath.Join(projectDir, ".claude", "skills", "my-skill")
 	os.WriteFile(filepath.Join(skillPath, "workflow.md"), []byte("# MODIFIED"), 0644)
 
 	// Second sync should skip due to checksum mismatch
-	result, err := syncer.Sync(cfg)
+	result, err := syncer.Sync(cfg, baseDirs)
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -252,27 +288,40 @@ func TestSync_FailedSource_ContinuesOthers(t *testing.T) {
 	srcDir := createLocalSource(t, t.TempDir(), "good-skill")
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
 
-	syncer := &Syncer{
-		GitFetcher:  &mockFetcher{shouldFail: true},
-		Provider:    prov,
-		ProjectRoot: projectDir,
-	}
+	fetcher := &mockFetcher{shouldFail: true}
+
+	gitURL := "git@github.com:bad/repo.git"
+	gitIncludes := []string{"bad-skill"}
+	localIncludes := []string{"good-skill"}
 
 	cfg := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: "git@github.com:bad/repo.git", Include: []string{"bad-skill"}, Type: "soft"},
-			{Source: srcDir, Include: []string{"good-skill"}, Type: "soft"},
+			{Source: gitURL, Include: gitIncludes, Type: "soft", ParsedIncludes: parsedIncludes(gitIncludes)},
+			{Source: srcDir, Include: localIncludes, Type: "soft", ParsedIncludes: parsedIncludes(localIncludes)},
 		},
 	}
 
-	result, err := syncer.Sync(cfg)
+	// FetchSources will fail for git source but succeed for local
+	baseDirs, fetchErrs := FetchSources(fetcher, cfg.Skills)
+	if len(fetchErrs) != 1 {
+		t.Fatalf("expected 1 fetch error, got %d: %v", len(fetchErrs), fetchErrs)
+	}
+
+	syncer := &Syncer{
+		GitFetcher:  fetcher,
+		Provider:    prov,
+		ProjectRoot: projectDir,
+	}
+
+	result, err := syncer.Sync(cfg, baseDirs)
 	if err == nil {
 		t.Fatal("expected error for failed source")
 	}
 	if result.Synced != 1 {
 		t.Errorf("synced = %d, want 1 (good source)", result.Synced)
 	}
+	// Sync reports 1 error for missing baseDirs entry
 	if len(result.Errors) != 1 {
 		t.Errorf("errors = %d, want 1", len(result.Errors))
 	}
@@ -296,14 +345,16 @@ func TestSync_PerSkillIsolation(t *testing.T) {
 		ProjectRoot: projectDir,
 	}
 
+	includes := []string{"good-skill", "missing-skill", "another-good"}
 	cfg := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: srcDir, Include: []string{"good-skill", "missing-skill", "another-good"}, Type: "soft"},
+			{Source: srcDir, Include: includes, Type: "soft", ParsedIncludes: parsedIncludes(includes)},
 		},
 	}
 
-	result, err := syncer.Sync(cfg)
+	baseDirs := buildBaseDirs(srcDir)
+	result, err := syncer.Sync(cfg, baseDirs)
 	if err == nil {
 		t.Fatal("expected error for missing skill")
 	}
@@ -346,13 +397,15 @@ func TestSync_StaleReconciliation(t *testing.T) {
 	}
 
 	// First sync with both skills
+	includes1 := []string{"keep-skill", "remove-skill"}
 	cfg1 := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: srcDir, Include: []string{"keep-skill", "remove-skill"}, Type: "soft"},
+			{Source: srcDir, Include: includes1, Type: "soft", ParsedIncludes: parsedIncludes(includes1)},
 		},
 	}
-	syncer.Sync(cfg1)
+	baseDirs := buildBaseDirs(srcDir)
+	syncer.Sync(cfg1, baseDirs)
 
 	// Verify both exist
 	keepPath := filepath.Join(projectDir, ".claude", "skills", "keep-skill")
@@ -365,13 +418,14 @@ func TestSync_StaleReconciliation(t *testing.T) {
 	}
 
 	// Second sync without remove-skill
+	includes2 := []string{"keep-skill"}
 	cfg2 := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: srcDir, Include: []string{"keep-skill"}, Type: "soft"},
+			{Source: srcDir, Include: includes2, Type: "soft", ParsedIncludes: parsedIncludes(includes2)},
 		},
 	}
-	syncer.Sync(cfg2)
+	syncer.Sync(cfg2, baseDirs)
 
 	// keep-skill should still exist
 	if _, err := os.Lstat(keepPath); err != nil {
@@ -393,17 +447,20 @@ func TestSync_Idempotent(t *testing.T) {
 		ProjectRoot: projectDir,
 	}
 
+	includes := []string{"my-skill"}
 	cfg := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: srcDir, Include: []string{"my-skill"}, Type: "soft"},
+			{Source: srcDir, Include: includes, Type: "soft", ParsedIncludes: parsedIncludes(includes)},
 		},
 	}
 
-	syncer.Sync(cfg)
+	baseDirs := buildBaseDirs(srcDir)
+
+	syncer.Sync(cfg, baseDirs)
 	gitignore1, _ := os.ReadFile(filepath.Join(projectDir, ".gitignore"))
 
-	syncer.Sync(cfg)
+	syncer.Sync(cfg, baseDirs)
 	gitignore2, _ := os.ReadFile(filepath.Join(projectDir, ".gitignore"))
 
 	if string(gitignore1) != string(gitignore2) {
@@ -446,21 +503,30 @@ func TestSync_Integration_FullFlow(t *testing.T) {
 
 	prov, _ := provider.Get("claude")
 
+	fetcher := &loregit.GoGitFetcher{}
+
+	includes := []string{"skill-alpha", "skill-beta"}
+	cfg := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills: []config.SkillSource{
+			{Source: repoPath, Include: includes, Type: "soft", ParsedIncludes: parsedIncludes(includes)},
+		},
+	}
+
+	// Two-phase: fetch first, then sync
+	baseDirs, fetchErrs := FetchSources(fetcher, cfg.Skills)
+	if len(fetchErrs) > 0 {
+		t.Fatalf("FetchSources errors: %v", fetchErrs)
+	}
+
 	syncer := &Syncer{
-		GitFetcher:  &loregit.GoGitFetcher{},
+		GitFetcher:  fetcher,
 		Provider:    prov,
 		ProjectRoot: projectDir,
 	}
 
-	cfg := &config.Config{
-		Providers: config.ProviderList{"claude"},
-		Skills: []config.SkillSource{
-			{Source: repoPath, Include: []string{"skill-alpha", "skill-beta"}, Type: "soft"},
-		},
-	}
-
 	// First sync
-	result, err := syncer.Sync(cfg)
+	result, err := syncer.Sync(cfg, baseDirs)
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -487,14 +553,20 @@ func TestSync_Integration_FullFlow(t *testing.T) {
 	}
 
 	// Remove one skill from config, re-sync
+	includes2 := []string{"skill-alpha"}
 	cfg2 := &config.Config{
 		Providers: config.ProviderList{"claude"},
 		Skills: []config.SkillSource{
-			{Source: repoPath, Include: []string{"skill-alpha"}, Type: "soft"},
+			{Source: repoPath, Include: includes2, Type: "soft", ParsedIncludes: parsedIncludes(includes2)},
 		},
 	}
 
-	result2, err := syncer.Sync(cfg2)
+	baseDirs2, fetchErrs2 := FetchSources(fetcher, cfg2.Skills)
+	if len(fetchErrs2) > 0 {
+		t.Fatalf("FetchSources errors: %v", fetchErrs2)
+	}
+
+	result2, err := syncer.Sync(cfg2, baseDirs2)
 	if err != nil {
 		t.Fatalf("re-Sync: %v", err)
 	}
@@ -519,6 +591,48 @@ func TestSync_Integration_FullFlow(t *testing.T) {
 				t.Error("stale skill-beta symlink into cache not reconciled")
 			}
 		}
+	}
+}
+
+func TestSync_NilProviderReturnsError(t *testing.T) {
+	syncer := &Syncer{
+		GitFetcher:  &mockFetcher{},
+		Provider:    nil,
+		ProjectRoot: t.TempDir(),
+	}
+
+	cfg := &config.Config{
+		Providers: config.ProviderList{"claude"},
+	}
+
+	_, err := syncer.Sync(cfg, map[string]string{})
+	if err == nil {
+		t.Fatal("expected error for nil provider")
+	}
+	if !strings.Contains(err.Error(), "provider must be set") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestFetchSources_SourceIsolation(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	goodDir := createLocalSource(t, t.TempDir(), "skill-a")
+
+	sources := []config.SkillSource{
+		{Source: goodDir},
+		{Source: "/nonexistent/bad/path"},
+	}
+
+	baseDirs, errs := FetchSources(&mockFetcher{}, sources)
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if _, ok := baseDirs[goodDir]; !ok {
+		t.Error("good source missing from baseDirs")
+	}
+	if _, ok := baseDirs["/nonexistent/bad/path"]; ok {
+		t.Error("bad source should not be in baseDirs")
 	}
 }
 

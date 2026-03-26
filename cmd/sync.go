@@ -52,13 +52,20 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	fetcher := &git.ExecGitFetcher{}
+
+	baseDirs, fetchErrs := loresync.FetchSources(fetcher, cfg.Skills)
+	for _, e := range fetchErrs {
+		fmt.Fprintln(os.Stderr, e)
+	}
+
 	syncer := &loresync.Syncer{
-		GitFetcher:  &git.ExecGitFetcher{},
+		GitFetcher:  fetcher,
 		Provider:    prov,
 		ProjectRoot: projectRoot,
 	}
 
-	result, err := syncer.Sync(cfg)
+	result, err := syncer.Sync(cfg, baseDirs)
 	if err != nil {
 		if result != nil {
 			for _, e := range result.Errors {
