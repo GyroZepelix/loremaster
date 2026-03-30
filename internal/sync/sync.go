@@ -11,7 +11,6 @@ import (
 	"github.com/GyroZepelix/loremaster/internal/config"
 	"github.com/GyroZepelix/loremaster/internal/git"
 	"github.com/GyroZepelix/loremaster/internal/gitignore"
-	"github.com/GyroZepelix/loremaster/internal/manifest"
 	"github.com/GyroZepelix/loremaster/internal/provider"
 )
 
@@ -19,15 +18,20 @@ type Syncer struct {
 	GitFetcher  git.Fetcher
 	Provider    provider.Provider
 	ProjectRoot string
-	Manifest    *manifest.Manifest
 	ProfileName string
+	// ManifestSnapshot holds the profile entries from the manifest BEFORE the
+	// current sync. Used by reconcileStale for ownership detection. Must be a
+	// copy, not an alias, of the manifest slice.
+	ManifestSnapshot []string
 }
 
 type SyncResult struct {
-	Synced   int
-	Sources  int
-	Errors   []string
-	Manifest *manifest.Manifest
+	Synced  int
+	Sources int
+	Errors  []string
+	// Entries captures the project-root-relative paths of all synced skills
+	// for this provider run.
+	Entries []string
 }
 
 // FetchSources resolves base directories for all skill sources. For git sources
@@ -127,19 +131,13 @@ func (s *Syncer) Sync(cfg *config.Config, baseDirs map[string]string) (*SyncResu
 	}
 
 	result.Synced = len(syncedEntries)
+	result.Entries = syncedEntries
 
 	// Reconcile stale skills
-	staleEntries, err := s.reconcileStale(desiredSkills, s.Manifest, s.ProfileName)
+	staleEntries, err := s.reconcileStale(desiredSkills)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("reconcile stale: %s", err))
 	}
-
-	// Update manifest with synced entries only when there are no source-level errors,
-	// to avoid overwriting previous good state on transient failures.
-	if s.Manifest != nil && s.ProfileName != "" && len(result.Errors) == 0 {
-		s.Manifest.SetProfile(s.ProfileName, syncedEntries)
-	}
-	result.Manifest = s.Manifest
 
 	// Update gitignore
 	gitignorePath := filepath.Join(s.ProjectRoot, ".gitignore")
@@ -190,52 +188,55 @@ func (s *Syncer) syncSource(src config.SkillSource, baseDir string, syncedEntrie
 	return skillErrors, nil
 }
 
-func (s *Syncer) reconcileStale(desiredSkills map[string]bool, m *manifest.Manifest, profileName string) ([]string, error) {
-	skillsParent := filepath.Dir(s.Provider.SkillDir(s.ProjectRoot, "dummy"))
-
-	// Manifest-aware scoping
-	if m != nil {
-		entries, exists := m.GetProfile(profileName)
-		if !exists || len(entries) == 0 {
-			// First run for this profile — skip reconciliation (PM-1)
-			return nil, nil
-		}
+// reconcileStale removes skills that are in the manifest snapshot but not in
+// the desired set. Detection is manifest-driven: if an entry is in
+// ManifestSnapshot and not in desiredSkills, it is stale. Filesystem type
+// checks (symlink, .lore-checksum) serve as safety verification.
+func (s *Syncer) reconcileStale(desiredSkills map[string]bool) ([]string, error) {
+	// First-run guard: empty snapshot means nothing to reconcile.
+	// This collapses "no manifest" and "empty profile" into one path.
+	if len(s.ManifestSnapshot) == 0 {
+		return nil, nil
 	}
+
+	skillsParent := filepath.Dir(s.Provider.SkillDir(s.ProjectRoot, "dummy"))
 
 	if _, err := os.Stat(skillsParent); os.IsNotExist(err) {
 		return nil, nil
 	}
 
-	cacheDir, err := cache.Dir()
-	if err != nil {
-		return nil, fmt.Errorf("resolve cache dir: %w", err)
-	}
-	absCacheDir, err := filepath.Abs(cacheDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve absolute cache dir: %w", err)
-	}
-
-	// Build set of profile-owned entries for manifest-scoped reconciliation
-	var ownedEntries map[string]bool
-	if m != nil {
-		entries, _ := m.GetProfile(profileName)
-		ownedEntries = make(map[string]bool, len(entries))
-		for _, e := range entries {
-			// Manifest entries are project-root-relative (e.g. ".claude/skills/brainstorm")
-			// Convert to skillsParent-relative for comparison
-			rel, err := filepath.Rel(skillsParent, filepath.Join(s.ProjectRoot, e))
-			if err == nil {
-				ownedEntries[rel] = true
-			}
+	// Build set of profile-owned entries from the snapshot.
+	// Cross-provider entries produce ../.. relative paths via filepath.Rel,
+	// which never match WalkDir results. This implicitly filters ownedEntries
+	// to only the current provider's entries.
+	ownedEntries := make(map[string]bool, len(s.ManifestSnapshot))
+	for _, e := range s.ManifestSnapshot {
+		// Manifest entries are project-root-relative (e.g. ".claude/skills/brainstorm")
+		// Convert to skillsParent-relative for comparison with WalkDir results
+		rel, err := filepath.Rel(skillsParent, filepath.Join(s.ProjectRoot, e))
+		if err == nil {
+			ownedEntries[rel] = true
 		}
 	}
 
 	var staleEntries []string
 	var stalePaths []string // absolute paths of removed leaves, for parent cleanup
 
-	err = filepath.WalkDir(skillsParent, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(skillsParent, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: reconcile walk: %s\n", err)
+			// Broken symlinks cause WalkDir errors — attempt cleanup if owned and stale
+			if info, lstatErr := os.Lstat(path); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+				rel, _ := filepath.Rel(skillsParent, path)
+				if ownedEntries[rel] && !desiredSkills[rel] {
+					if rmErr := os.Remove(path); rmErr == nil {
+						relFromRoot, _ := filepath.Rel(s.ProjectRoot, path)
+						staleEntries = append(staleEntries, relFromRoot)
+						stalePaths = append(stalePaths, path)
+					}
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "warning: reconcile walk: %s\n", err)
+			}
 			return nil
 		}
 		if path == skillsParent {
@@ -252,46 +253,58 @@ func (s *Syncer) reconcileStale(desiredSkills map[string]bool, m *manifest.Manif
 			return nil
 		}
 
-		// Check if managed: symlink-to-cache or dir-with-checksum
+		// Check for symlinks (Lstat needed since WalkDir follows symlinks)
 		info, lstatErr := os.Lstat(path)
 		if lstatErr != nil {
 			return nil
 		}
 
 		if info.Mode()&os.ModeSymlink != 0 {
-			target, _ := os.Readlink(path)
-			absTarget, _ := filepath.Abs(filepath.Join(filepath.Dir(path), target))
-			if strings.HasPrefix(absTarget, absCacheDir) {
-				// Managed symlink — check manifest scope
-				if ownedEntries != nil && !ownedEntries[rel] {
-					return nil // Not owned by this profile
-				}
-				if err := os.Remove(path); err != nil {
-					return fmt.Errorf("remove stale symlink %q: %w", path, err)
-				}
-				relFromRoot, _ := filepath.Rel(s.ProjectRoot, path)
-				staleEntries = append(staleEntries, relFromRoot)
-				stalePaths = append(stalePaths, path)
+			if !ownedEntries[rel] {
+				return nil // Not in manifest — not managed by loremaster
 			}
+			if desiredSkills[rel] {
+				return nil // Still desired — defense-in-depth
+			}
+			// Stale managed symlink — remove
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("remove stale symlink %q: %w", path, err)
+			}
+			relFromRoot, _ := filepath.Rel(s.ProjectRoot, path)
+			staleEntries = append(staleEntries, relFromRoot)
+			stalePaths = append(stalePaths, path)
 			return nil
 		}
 
 		if d.IsDir() {
 			checksumFile := filepath.Join(path, ".lore-checksum")
-			if _, err := os.Stat(checksumFile); err == nil {
-				// Managed hard copy — check manifest scope
-				if ownedEntries != nil && !ownedEntries[rel] {
-					return fs.SkipDir // Not owned, skip walking into it
-				}
-				if err := os.RemoveAll(path); err != nil {
-					return fmt.Errorf("remove stale hard copy %q: %w", path, err)
-				}
-				relFromRoot, _ := filepath.Rel(s.ProjectRoot, path)
-				staleEntries = append(staleEntries, relFromRoot)
-				stalePaths = append(stalePaths, path)
+			storedChecksum, readErr := os.ReadFile(checksumFile)
+			if readErr != nil {
+				return nil // No checksum — not managed, continue walking
+			}
+			if !ownedEntries[rel] {
+				return fs.SkipDir // Managed but not owned by this profile
+			}
+			if desiredSkills[rel] {
+				return fs.SkipDir // Still desired
+			}
+			// Verify checksum before removing
+			currentChecksum, err := ComputeDirChecksum(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: skipping %q: could not verify checksum: %s\n", rel, err)
 				return fs.SkipDir
 			}
-			// Plain directory — intermediate, continue walking
+			if strings.TrimSpace(string(storedChecksum)) != currentChecksum {
+				fmt.Fprintf(os.Stderr, "warning: skipping %q: local modifications detected\n", rel)
+				return fs.SkipDir
+			}
+			if err := os.RemoveAll(path); err != nil {
+				return fmt.Errorf("remove stale hard copy %q: %w", path, err)
+			}
+			relFromRoot, _ := filepath.Rel(s.ProjectRoot, path)
+			staleEntries = append(staleEntries, relFromRoot)
+			stalePaths = append(stalePaths, path)
+			return fs.SkipDir
 		}
 		return nil
 	})
@@ -299,7 +312,7 @@ func (s *Syncer) reconcileStale(desiredSkills map[string]bool, m *manifest.Manif
 		return staleEntries, err
 	}
 
-	// Clean up empty parent directories bottom-up (PM-8)
+	// Clean up empty parent directories bottom-up
 	cleanedDirs := make(map[string]bool)
 	for _, stalePath := range stalePaths {
 		dir := filepath.Dir(stalePath)

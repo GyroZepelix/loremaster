@@ -396,13 +396,14 @@ func TestSync_StaleReconciliation(t *testing.T) {
 	cacheBase := filepath.Join(t.TempDir(), "cache")
 	t.Setenv("XDG_DATA_HOME", cacheBase)
 
+	// First sync with both skills (empty snapshot = first run, skip reconciliation)
 	syncer := &Syncer{
-		GitFetcher:  &mockFetcher{},
-		Provider:    prov,
-		ProjectRoot: projectDir,
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: []string{},
 	}
 
-	// First sync with both skills
 	includes1 := []string{"keep-skill", "remove-skill"}
 	cfg1 := &config.Config{
 		Providers: config.ProviderList{"claude"},
@@ -411,7 +412,8 @@ func TestSync_StaleReconciliation(t *testing.T) {
 		},
 	}
 	baseDirs := buildBaseDirs(srcDir)
-	if _, err := syncer.Sync(cfg1, baseDirs); err != nil {
+	result1, err := syncer.Sync(cfg1, baseDirs)
+	if err != nil {
 		t.Fatalf("first Sync: %v", err)
 	}
 
@@ -425,7 +427,14 @@ func TestSync_StaleReconciliation(t *testing.T) {
 		t.Fatal("remove-skill not created")
 	}
 
-	// Second sync without remove-skill
+	// Second sync without remove-skill, using first sync's entries as snapshot
+	syncer2 := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: result1.Entries,
+	}
+
 	includes2 := []string{"keep-skill"}
 	cfg2 := &config.Config{
 		Providers: config.ProviderList{"claude"},
@@ -433,7 +442,7 @@ func TestSync_StaleReconciliation(t *testing.T) {
 			{Source: srcDir, Include: includes2, Type: "soft", ParsedIncludes: parsedIncludes(includes2)},
 		},
 	}
-	if _, err := syncer.Sync(cfg2, baseDirs); err != nil {
+	if _, err := syncer2.Sync(cfg2, baseDirs); err != nil {
 		t.Fatalf("second Sync: %v", err)
 	}
 
@@ -441,9 +450,10 @@ func TestSync_StaleReconciliation(t *testing.T) {
 	if _, err := os.Lstat(keepPath); err != nil {
 		t.Error("keep-skill was removed")
 	}
-	// remove-skill: reconciliation only removes symlinks pointing into cache dir
-	// Local source symlinks point to local path, not cache, so they won't be auto-removed
-	// This is expected behavior — stale reconciliation targets cache-backed symlinks
+	// remove-skill should be removed (manifest-based detection works for all symlinks)
+	if _, err := os.Lstat(removePath); err == nil {
+		t.Error("stale remove-skill should be removed")
+	}
 }
 
 func TestSync_Idempotent(t *testing.T) {
@@ -873,9 +883,10 @@ func TestSync_StaleNested_EmptyParentCleanup(t *testing.T) {
 
 	// Sync WITHOUT loa/brainstorm in config → should remove it and clean parent
 	syncer := &Syncer{
-		GitFetcher:  &mockFetcher{},
-		Provider:    prov,
-		ProjectRoot: projectDir,
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: []string{".claude/skills/loa/brainstorm"},
 	}
 
 	cfg := &config.Config{
@@ -911,9 +922,10 @@ func TestSync_StaleNested_ParentPreserved(t *testing.T) {
 	// Sync with only loa/helper in config → loa/brainstorm removed, loa/ preserved
 	repoRoot := filepath.Join(cacheBase, "loremaster", "repos", "fakerepo")
 	syncer := &Syncer{
-		GitFetcher:  &mockFetcher{},
-		Provider:    prov,
-		ProjectRoot: projectDir,
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: []string{".claude/skills/loa/brainstorm", ".claude/skills/loa/helper"},
 	}
 
 	cfg := &config.Config{
@@ -958,19 +970,19 @@ func TestSync_StaleNested_ParentPreserved(t *testing.T) {
 
 // --- Task 3: Manifest-aware reconciliation tests (AC: 7, 8, 9) ---
 
-func TestSync_NoManifest_ReconcileAllStale(t *testing.T) {
+func TestSync_FirstRun_SkipReconciliation(t *testing.T) {
 	projectDir, prov := setupTestProject(t)
 	cacheBase := filepath.Join(t.TempDir(), "cache")
 	t.Setenv("XDG_DATA_HOME", cacheBase)
 
-	// Create a cached symlink that will become stale
+	// Create a cached symlink that should NOT be removed during first-run
 	setupCachedSymlink(t, projectDir, cacheBase, "old-skill")
 
 	syncer := &Syncer{
-		GitFetcher:  &mockFetcher{},
-		Provider:    prov,
-		ProjectRoot: projectDir,
-		Manifest:    nil, // No manifest
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: []string{}, // First run — empty snapshot
 	}
 
 	cfg := &config.Config{
@@ -978,14 +990,20 @@ func TestSync_NoManifest_ReconcileAllStale(t *testing.T) {
 		Skills:    []config.SkillSource{},
 	}
 
-	if _, err := syncer.Sync(cfg, map[string]string{}); err != nil {
+	result, err := syncer.Sync(cfg, map[string]string{})
+	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
-	// old-skill should be removed (no manifest = reconcile all)
+	// old-skill should NOT be removed (first-run skip — snapshot is empty)
 	skillPath := filepath.Join(projectDir, ".claude", "skills", "old-skill")
-	if _, err := os.Lstat(skillPath); err == nil {
-		t.Error("stale old-skill should be removed when no manifest")
+	if _, err := os.Lstat(skillPath); err != nil {
+		t.Error("old-skill should be preserved during first-run (empty snapshot)")
+	}
+
+	// result.Entries should be empty (no skills configured)
+	if len(result.Entries) != 0 {
+		t.Errorf("result.Entries = %d, want 0", len(result.Entries))
 	}
 }
 
@@ -1004,12 +1022,13 @@ func TestSync_ManifestProfile_OnlyProfileStaleRemoved(t *testing.T) {
 	mf.SetProfile("staging", []string{".claude/skills/skill-c"})
 
 	// Sync as "dev" with only skill-b in config → skill-a removed, skill-c preserved
+	devEntries, _ := mf.GetProfile("dev")
 	syncer := &Syncer{
-		GitFetcher:  &mockFetcher{},
-		Provider:    prov,
-		ProjectRoot: projectDir,
-		Manifest:    mf,
-		ProfileName: "dev",
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ProfileName:      "dev",
+		ManifestSnapshot: append([]string(nil), devEntries...),
 	}
 
 	skillBSrc := filepath.Join(cacheBase, "loremaster", "repos", "fakerepo", "skill-b")
@@ -1029,7 +1048,8 @@ func TestSync_ManifestProfile_OnlyProfileStaleRemoved(t *testing.T) {
 		"git@github.com:user/repo.git": filepath.Dir(skillBSrc),
 	}
 
-	if _, err := syncer.Sync(cfg, baseDirs); err != nil {
+	result, err := syncer.Sync(cfg, baseDirs)
+	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 
@@ -1051,13 +1071,9 @@ func TestSync_ManifestProfile_OnlyProfileStaleRemoved(t *testing.T) {
 		t.Error("skill-b should still exist (in current config)")
 	}
 
-	// Verify manifest dev profile updated to only contain skill-b
-	devEntries, exists := mf.GetProfile("dev")
-	if !exists {
-		t.Error("dev profile should still exist in manifest")
-	}
-	if len(devEntries) != 1 {
-		t.Errorf("dev profile entries = %d, want 1", len(devEntries))
+	// Verify result.Entries contains only skill-b
+	if len(result.Entries) != 1 {
+		t.Errorf("result.Entries = %d, want 1", len(result.Entries))
 	}
 }
 
@@ -1069,18 +1085,14 @@ func TestSync_ManifestFirstRunProfile_SkipReconciliation(t *testing.T) {
 	// Create a stale cached symlink that should NOT be removed during first-run
 	setupCachedSymlink(t, projectDir, cacheBase, "existing-stale")
 
-	// Manifest exists but "newprof" has no entries (first run)
-	mf := manifest.New()
-	// newprof doesn't exist in manifest yet — GetProfile returns (nil, false)
-
 	srcDir := createLocalSource(t, t.TempDir(), "skill-x")
 
 	syncer := &Syncer{
-		GitFetcher:  &mockFetcher{},
-		Provider:    prov,
-		ProjectRoot: projectDir,
-		Manifest:    mf,
-		ProfileName: "newprof",
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ProfileName:      "newprof",
+		ManifestSnapshot: []string{}, // First run for this profile
 	}
 
 	cfg := &config.Config{
@@ -1112,13 +1124,9 @@ func TestSync_ManifestFirstRunProfile_SkipReconciliation(t *testing.T) {
 		t.Error("existing-stale should be preserved during first-run profile sync")
 	}
 
-	// Manifest should now have newprof entries registered
-	entries, exists := mf.GetProfile("newprof")
-	if !exists {
-		t.Error("newprof should exist in manifest after sync")
-	}
-	if len(entries) != 1 {
-		t.Errorf("newprof entries = %d, want 1", len(entries))
+	// result.Entries should contain skill-x
+	if len(result.Entries) != 1 {
+		t.Errorf("result.Entries = %d, want 1", len(result.Entries))
 	}
 }
 
@@ -1423,7 +1431,6 @@ func TestSync_CorruptedManifest(t *testing.T) {
 		GitFetcher:  &mockFetcher{},
 		Provider:    prov,
 		ProjectRoot: projectDir,
-		Manifest:    mf, // nil — corrupted manifest loaded
 	}
 
 	includes := []string{"test-skill"}
@@ -1469,5 +1476,443 @@ func TestSync_PartialFetchFailure(t *testing.T) {
 	// bad source should NOT be in baseDirs
 	if _, ok := baseDirs["git@github.com:bad/repo.git"]; ok {
 		t.Error("bad source should not be in baseDirs")
+	}
+}
+
+// --- Bug fix tests ---
+
+// setupLocalSymlink creates a symlink from .claude/skills/{skillRelPath} to localSrcDir/{skillRelPath}.
+func setupLocalSymlink(t *testing.T, projectDir, localSrcDir, skillRelPath string) {
+	t.Helper()
+	skillLink := filepath.Join(projectDir, ".claude", "skills", skillRelPath)
+	os.MkdirAll(filepath.Dir(skillLink), 0755)
+	target := filepath.Join(localSrcDir, skillRelPath)
+	os.Symlink(target, skillLink)
+}
+
+func TestSync_MultiProvider_StaleRemoval(t *testing.T) {
+	projectDir := t.TempDir()
+	os.MkdirAll(filepath.Join(projectDir, ".claude"), 0755)
+	os.MkdirAll(filepath.Join(projectDir, ".opencode"), 0755)
+	cacheBase := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("XDG_DATA_HOME", cacheBase)
+
+	// Setup: create cached symlinks for skill-a and skill-b under both providers
+	setupCachedSymlink(t, projectDir, cacheBase, "skill-a")
+	setupCachedSymlink(t, projectDir, cacheBase, "skill-b")
+	// Also create opencode symlinks manually
+	ocSkillsDir := filepath.Join(projectDir, ".opencode", "skills")
+	os.MkdirAll(ocSkillsDir, 0755)
+	for _, skill := range []string{"skill-a", "skill-b"} {
+		cacheSkillDir := filepath.Join(cacheBase, "loremaster", "repos", "fakerepo", skill)
+		relTarget, _ := filepath.Rel(ocSkillsDir, cacheSkillDir)
+		os.Symlink(relTarget, filepath.Join(ocSkillsDir, skill))
+	}
+
+	// Manifest has entries for both providers' both skills
+	snapshot := []string{
+		".claude/skills/skill-a", ".claude/skills/skill-b",
+		".opencode/skills/skill-a", ".opencode/skills/skill-b",
+	}
+
+	repoRoot := filepath.Join(cacheBase, "loremaster", "repos", "fakerepo")
+	cfg := &config.Config{
+		Providers: config.ProviderList{"claude", "opencode"},
+		Skills: []config.SkillSource{
+			{
+				Source:         "git@github.com:user/repo.git",
+				Include:        []string{"skill-b"},
+				Type:           "soft",
+				ParsedIncludes: []config.IncludeEntry{{Src: "skill-b", Dst: "skill-b"}},
+			},
+		},
+	}
+	baseDirs := map[string]string{
+		"git@github.com:user/repo.git": repoRoot,
+	}
+
+	claudeProv, _ := provider.Get("claude")
+	opencodeProv, _ := provider.Get("opencode")
+
+	// Sync for claude with snapshot
+	syncer1 := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         claudeProv,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: snapshot,
+	}
+	result1, err := syncer1.Sync(cfg, baseDirs)
+	if err != nil {
+		t.Fatalf("Sync claude: %v", err)
+	}
+
+	// Sync for opencode with the SAME pre-loop snapshot (not mutated by provider 1)
+	syncer2 := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         opencodeProv,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: snapshot,
+	}
+	result2, err := syncer2.Sync(cfg, baseDirs)
+	if err != nil {
+		t.Fatalf("Sync opencode: %v", err)
+	}
+
+	// skill-a removed from BOTH providers
+	if _, err := os.Lstat(filepath.Join(projectDir, ".claude", "skills", "skill-a")); err == nil {
+		t.Error("skill-a not removed from .claude/skills/")
+	}
+	if _, err := os.Lstat(filepath.Join(projectDir, ".opencode", "skills", "skill-a")); err == nil {
+		t.Error("skill-a not removed from .opencode/skills/")
+	}
+
+	// skill-b exists in both
+	if _, err := os.Lstat(filepath.Join(projectDir, ".claude", "skills", "skill-b")); err != nil {
+		t.Error("skill-b should exist in .claude/skills/")
+	}
+	if _, err := os.Lstat(filepath.Join(projectDir, ".opencode", "skills", "skill-b")); err != nil {
+		t.Error("skill-b should exist in .opencode/skills/")
+	}
+
+	// result.Entries should contain skill-b for each
+	if len(result1.Entries) != 1 {
+		t.Errorf("claude result.Entries = %d, want 1", len(result1.Entries))
+	}
+	if len(result2.Entries) != 1 {
+		t.Errorf("opencode result.Entries = %d, want 1", len(result2.Entries))
+	}
+}
+
+func TestSync_LocalSource_StaleRemoval(t *testing.T) {
+	projectDir, prov := setupTestProject(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	// Create a local source dir with my-skill
+	localSrcDir := createLocalSource(t, t.TempDir(), "my-skill")
+
+	// Create a symlink pointing to the local source (NOT into cache)
+	setupLocalSymlink(t, projectDir, localSrcDir, "my-skill")
+
+	// Verify symlink exists
+	skillPath := filepath.Join(projectDir, ".claude", "skills", "my-skill")
+	if _, err := os.Lstat(skillPath); err != nil {
+		t.Fatal("setup failed: local symlink not created")
+	}
+
+	// Setup gitignore with the entry
+	gitignorePath := filepath.Join(projectDir, ".gitignore")
+	os.WriteFile(gitignorePath, []byte("# Managed by loremaster\n.claude/skills/my-skill\n"), 0644)
+
+	// Sync with empty config → my-skill should be removed
+	syncer := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: []string{".claude/skills/my-skill"},
+	}
+
+	cfg := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills:    []config.SkillSource{},
+	}
+
+	if _, err := syncer.Sync(cfg, map[string]string{}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// The local-source symlink IS removed
+	if _, err := os.Lstat(skillPath); err == nil {
+		t.Error("stale local-source symlink should be removed")
+	}
+
+	// Gitignore entry removed
+	gitContent, _ := os.ReadFile(gitignorePath)
+	if containsLine(string(gitContent), ".claude/skills/my-skill") {
+		t.Error("gitignore should not contain my-skill after removal")
+	}
+}
+
+func TestSync_IncludePathChange_OldLocationRemoved(t *testing.T) {
+	projectDir, prov := setupTestProject(t)
+	srcDir := createNestedLocalSource(t, t.TempDir(), "skill")
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	// First sync: include: [skill] → creates .claude/skills/skill
+	syncer1 := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: []string{},
+	}
+
+	cfg1 := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills: []config.SkillSource{
+			{
+				Source:         srcDir,
+				Include:        []string{"skill"},
+				Type:           "soft",
+				ParsedIncludes: []config.IncludeEntry{{Src: "skill", Dst: "skill"}},
+			},
+		},
+	}
+
+	baseDirs := buildBaseDirs(srcDir)
+	result1, err := syncer1.Sync(cfg1, baseDirs)
+	if err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	// Verify old location exists
+	oldPath := filepath.Join(projectDir, ".claude", "skills", "skill")
+	if _, err := os.Lstat(oldPath); err != nil {
+		t.Fatal("skill not created at old location")
+	}
+
+	// Second sync: include: [skill:tools/skill] with first sync's entries as snapshot
+	syncer2 := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: result1.Entries,
+	}
+
+	cfg2 := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills: []config.SkillSource{
+			{
+				Source:         srcDir,
+				Include:        []string{"skill:tools/skill"},
+				Type:           "soft",
+				ParsedIncludes: []config.IncludeEntry{{Src: "skill", Dst: "tools/skill"}},
+			},
+		},
+	}
+
+	result2, err := syncer2.Sync(cfg2, baseDirs)
+	if err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+
+	// Old location removed
+	if _, err := os.Lstat(oldPath); err == nil {
+		t.Error("old location .claude/skills/skill should be removed")
+	}
+
+	// New location exists
+	newPath := filepath.Join(projectDir, ".claude", "skills", "tools", "skill")
+	if _, err := os.Lstat(newPath); err != nil {
+		t.Error("new location .claude/skills/tools/skill should exist")
+	}
+
+	// result.Entries contains only the new path
+	if len(result2.Entries) != 1 {
+		t.Errorf("result.Entries = %d, want 1", len(result2.Entries))
+	}
+	if len(result2.Entries) > 0 && result2.Entries[0] != ".claude/skills/tools/skill" {
+		t.Errorf("result.Entries[0] = %q, want .claude/skills/tools/skill", result2.Entries[0])
+	}
+}
+
+func TestSync_HardCopy_StaleReconcile_ChecksumVerified(t *testing.T) {
+	projectDir, prov := setupTestProject(t)
+	srcDir := createLocalSource(t, t.TempDir(), "my-skill")
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	// First sync: create hard copy
+	syncer1 := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: []string{},
+	}
+
+	includes := []string{"my-skill"}
+	cfg := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills: []config.SkillSource{
+			{Source: srcDir, Include: includes, Type: "hard", ParsedIncludes: parsedIncludes(includes)},
+		},
+	}
+
+	baseDirs := buildBaseDirs(srcDir)
+	result1, err := syncer1.Sync(cfg, baseDirs)
+	if err != nil {
+		t.Fatalf("first Sync: %v", err)
+	}
+
+	// Modify the copied skill (creates checksum mismatch)
+	skillPath := filepath.Join(projectDir, ".claude", "skills", "my-skill")
+	os.WriteFile(filepath.Join(skillPath, "workflow.md"), []byte("# MODIFIED"), 0644)
+
+	// Second sync: remove my-skill from config with snapshot from first sync
+	syncer2 := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: result1.Entries,
+	}
+
+	emptyCfg := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills:    []config.SkillSource{},
+	}
+
+	if _, err := syncer2.Sync(emptyCfg, map[string]string{}); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+
+	// Modified hard copy should NOT be removed
+	if _, err := os.Stat(skillPath); err != nil {
+		t.Error("modified hard copy should be preserved (checksum mismatch)")
+	}
+
+	// Content should still be modified
+	content, _ := os.ReadFile(filepath.Join(skillPath, "workflow.md"))
+	if string(content) != "# MODIFIED" {
+		t.Error("modified content should be preserved")
+	}
+}
+
+func TestSync_SnapshotIsolation_CrossProviderNoInterference(t *testing.T) {
+	mf := manifest.New()
+	mf.SetProfile("default", []string{
+		".claude/skills/skill-a", ".claude/skills/skill-b",
+		".opencode/skills/skill-a", ".opencode/skills/skill-b",
+	})
+
+	// Take snapshot as explicit copy
+	entries, _ := mf.GetProfile("default")
+	snapshot := append([]string(nil), entries...)
+
+	// Mutate the manifest directly (simulating what old code did)
+	mf.SetProfile("default", []string{".claude/skills/only-claude"})
+
+	// Snapshot should be unchanged
+	if len(snapshot) != 4 {
+		t.Errorf("snapshot length = %d, want 4 (should be isolated from manifest mutation)", len(snapshot))
+	}
+
+	// Verify snapshot contents
+	expected := map[string]bool{
+		".claude/skills/skill-a":   true,
+		".claude/skills/skill-b":   true,
+		".opencode/skills/skill-a": true,
+		".opencode/skills/skill-b": true,
+	}
+	for _, e := range snapshot {
+		if !expected[e] {
+			t.Errorf("unexpected snapshot entry: %q", e)
+		}
+	}
+}
+
+func TestSync_FirstRun_ManifestCreatedAndNoReconciliation(t *testing.T) {
+	projectDir, prov := setupTestProject(t)
+	cacheBase := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("XDG_DATA_HOME", cacheBase)
+
+	srcDir := createLocalSource(t, t.TempDir(), "new-skill")
+
+	// Place a pre-existing unmanaged symlink in the skills dir (simulates upgrade)
+	setupCachedSymlink(t, projectDir, cacheBase, "leftover-skill")
+
+	syncer := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ManifestSnapshot: []string{}, // First run — empty snapshot
+	}
+
+	includes := []string{"new-skill"}
+	cfg := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills: []config.SkillSource{
+			{Source: srcDir, Include: includes, Type: "soft", ParsedIncludes: parsedIncludes(includes)},
+		},
+	}
+	baseDirs := buildBaseDirs(srcDir)
+
+	result, err := syncer.Sync(cfg, baseDirs)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// New skill was synced
+	newSkillPath := filepath.Join(projectDir, ".claude", "skills", "new-skill")
+	if _, err := os.Lstat(newSkillPath); err != nil {
+		t.Error("new-skill should be created")
+	}
+
+	// result.Entries should contain the synced skill
+	if len(result.Entries) != 1 {
+		t.Errorf("result.Entries = %d, want 1", len(result.Entries))
+	}
+	if len(result.Entries) > 0 && result.Entries[0] != ".claude/skills/new-skill" {
+		t.Errorf("result.Entries[0] = %q, want .claude/skills/new-skill", result.Entries[0])
+	}
+
+	// Pre-existing leftover was NOT removed (empty snapshot = no reconciliation)
+	leftoverPath := filepath.Join(projectDir, ".claude", "skills", "leftover-skill")
+	if _, err := os.Lstat(leftoverPath); err != nil {
+		t.Error("leftover-skill should be preserved on first run (empty snapshot)")
+	}
+
+	// Gitignore should contain the new skill
+	gitContent, _ := os.ReadFile(filepath.Join(projectDir, ".gitignore"))
+	if !containsLine(string(gitContent), ".claude/skills/new-skill") {
+		t.Error("gitignore should contain new-skill")
+	}
+}
+
+func TestSync_MultiProfile_StaleRemovalIsolation(t *testing.T) {
+	projectDir, prov := setupTestProject(t)
+	cacheBase := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("XDG_DATA_HOME", cacheBase)
+
+	// Setup: skill-a and skill-b belong to "dev", skill-c belongs to "staging"
+	// All three exist on disk as cached symlinks
+	setupCachedSymlink(t, projectDir, cacheBase, "skill-a")
+	setupCachedSymlink(t, projectDir, cacheBase, "skill-b")
+	setupCachedSymlink(t, projectDir, cacheBase, "skill-c")
+
+	mf := manifest.New()
+	mf.SetProfile("dev", []string{".claude/skills/skill-a", ".claude/skills/skill-b"})
+	mf.SetProfile("staging", []string{".claude/skills/skill-c"})
+
+	// Sync as "staging" with empty config → skill-c should be removed
+	stagingEntries, _ := mf.GetProfile("staging")
+	syncer := &Syncer{
+		GitFetcher:       &mockFetcher{},
+		Provider:         prov,
+		ProjectRoot:      projectDir,
+		ProfileName:      "staging",
+		ManifestSnapshot: append([]string(nil), stagingEntries...),
+	}
+
+	cfg := &config.Config{
+		Providers: config.ProviderList{"claude"},
+		Skills:    []config.SkillSource{},
+	}
+
+	if _, err := syncer.Sync(cfg, map[string]string{}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// skill-c should be removed (owned by staging, not in config)
+	skillCPath := filepath.Join(projectDir, ".claude", "skills", "skill-c")
+	if _, err := os.Lstat(skillCPath); err == nil {
+		t.Error("skill-c should be removed (owned by staging, not in config)")
+	}
+
+	// skill-a and skill-b should be untouched (owned by dev, not staging)
+	skillAPath := filepath.Join(projectDir, ".claude", "skills", "skill-a")
+	if _, err := os.Lstat(skillAPath); err != nil {
+		t.Error("skill-a should be preserved (belongs to dev profile)")
+	}
+
+	skillBPath := filepath.Join(projectDir, ".claude", "skills", "skill-b")
+	if _, err := os.Lstat(skillBPath); err != nil {
+		t.Error("skill-b should be preserved (belongs to dev profile)")
 	}
 }
