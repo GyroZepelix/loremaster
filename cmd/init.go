@@ -10,6 +10,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var initProfileFlag string
+
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize a lore.yml configuration file",
@@ -18,6 +20,7 @@ var initCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(initCmd)
+	initCmd.Flags().StringVarP(&initProfileFlag, "profile", "p", "", "initialize a named profile (creates lore-<profile>.yml)")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -26,9 +29,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	// Check if lore.yml already exists
-	if existing, err := config.Locate(cwd); err == nil {
-		fmt.Printf("lore.yml already exists at %s\n", existing)
+	// Resolve config filename (validates profile name)
+	configFileName, err := config.ConfigFileName(initProfileFlag)
+	if err != nil {
+		return fmt.Errorf("invalid profile: %w", err)
+	}
+
+	// Check if config already exists for this profile
+	if existing, err := config.LocateProfile(cwd, initProfileFlag); err == nil {
+		fmt.Printf("%s already exists at %s\n", configFileName, existing)
 		return nil
 	}
 
@@ -76,20 +85,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 		selected = detected[choice-1]
 	}
 
-	// Generate skeleton lore.yml
+	// Generate skeleton config
 	skeleton := fmt.Sprintf(`provider: %s
 skills:
   # - source: git@github.com:user/skills-repo.git
   #   ref: main
-  #   include: [skill-name]
+  #   include: [skill-name, path/to/skill]
   #   type: soft
 `, selected.Name())
 
-	configPath := filepath.Join(cwd, "lore.yml")
+	configPath := filepath.Join(cwd, configFileName)
 	if err := os.WriteFile(configPath, []byte(skeleton), 0644); err != nil {
-		return fmt.Errorf("write lore.yml: %w", err)
+		return fmt.Errorf("write %s: %w", configFileName, err)
 	}
 
-	fmt.Printf("Created lore.yml for %s\n", selected.Name())
+	fmt.Printf("Created %s for %s\n", configFileName, selected.Name())
 	return nil
 }
