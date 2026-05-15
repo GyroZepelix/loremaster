@@ -2,7 +2,7 @@
 
 ![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPL--2.0-blue)
-![Version](https://img.shields.io/badge/version-0.2.0-green)
+![Version](https://img.shields.io/badge/version-0.3.0-green)
 
 Declarative skill syncer for AI coding tools. Define your skills in a config file, fetch them from git repos, and symlink them into your project — no manual copying, no git leakage. Supports profiles, multi-provider syncing, and subdirectory skill includes.
 
