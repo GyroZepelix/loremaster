@@ -66,10 +66,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 		selected = all[choice-1]
 
-		// Create the provider's marker directory
-		markerPath := filepath.Join(cwd, selected.MarkerDir())
+		// Create the provider's default config/marker directory.
+		defaultDir := selected.DefaultConfigDir()
+		markerPath := filepath.Join(cwd, defaultDir)
 		if err := os.MkdirAll(markerPath, 0755); err != nil {
-			return fmt.Errorf("create %s directory: %w", selected.MarkerDir(), err)
+			return fmt.Errorf("create %s directory: %w", defaultDir, err)
 		}
 	default:
 		// Multiple providers — prompt user

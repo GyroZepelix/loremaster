@@ -217,7 +217,7 @@ func retroRegisterDefault(mf *manifest.Manifest, cfg *config.Config, projectRoot
 		if err != nil {
 			return fmt.Errorf("get provider %q: %w", provName, err)
 		}
-		skillsParentDir := filepath.Dir(prov.SkillDir(projectRoot, "dummy"))
+		skillsParentDir := prov.SkillRoot(projectRoot)
 		relDir, err := filepath.Rel(projectRoot, skillsParentDir)
 		if err != nil {
 			return fmt.Errorf("compute relative path for %q: %w", provName, err)
@@ -360,7 +360,12 @@ func cleanRemovedProviders(snapshot []string, configProviders config.ProviderLis
 			errs = append(errs, fmt.Sprintf("warning: could not resolve provider %q: %s", provName, err))
 			continue
 		}
-		configuredPrefixes[prov.MarkerDir()+"/"] = true
+		prefix, err := skillRootPrefix(projectRoot, prov)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("warning: could not resolve provider %q skill root: %s", provName, err))
+			continue
+		}
+		configuredPrefixes[prefix+"/"] = true
 	}
 
 	if len(configuredPrefixes) == 0 {
@@ -370,8 +375,9 @@ func cleanRemovedProviders(snapshot []string, configProviders config.ProviderLis
 	for _, entry := range snapshot {
 		// Check if entry has a prefix matching any configured provider
 		hasConfiguredProvider := false
+		entrySlash := filepath.ToSlash(entry)
 		for prefix := range configuredPrefixes {
-			if strings.HasPrefix(entry, prefix) {
+			if strings.HasPrefix(entrySlash, prefix) {
 				hasConfiguredProvider = true
 				break
 			}
@@ -432,14 +438,9 @@ func cleanRemovedProviders(snapshot []string, configProviders config.ProviderLis
 			continue
 		}
 
-		// Clean up empty parent directories, stopping at the skills root
-		// (e.g., .claude/skills/) to avoid removing provider directories
-		parts := strings.SplitN(entry, "/", 3)
-		skillsRoot := projectRoot
-		if len(parts) >= 2 {
-			skillsRoot = filepath.Join(projectRoot, parts[0], parts[1])
-		}
-		cleanEmptyParents(filepath.Dir(absPath), skillsRoot)
+		// Clean up empty parent directories, stopping at the actual skills root
+		// (e.g., .pi/agent/skills) to avoid removing provider directories.
+		cleanEmptyParents(filepath.Dir(absPath), skillRootForEntry(projectRoot, entry))
 	}
 
 	// Remove gitignore entries for cleaned-up skills
@@ -450,6 +451,33 @@ func cleanRemovedProviders(snapshot []string, configProviders config.ProviderLis
 	}
 
 	return removed, errs
+}
+
+func skillRootPrefix(projectRoot string, prov provider.Provider) (string, error) {
+	rel, err := filepath.Rel(projectRoot, prov.SkillRoot(projectRoot))
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+func skillRootForEntry(projectRoot, entry string) string {
+	entrySlash := filepath.ToSlash(filepath.Clean(entry))
+	for _, prov := range provider.All() {
+		prefix, err := skillRootPrefix(projectRoot, prov)
+		if err != nil {
+			continue
+		}
+		if entrySlash == prefix || strings.HasPrefix(entrySlash, prefix+"/") {
+			return filepath.Join(projectRoot, filepath.FromSlash(prefix))
+		}
+	}
+
+	parts := strings.Split(entrySlash, "/")
+	if len(parts) >= 2 {
+		return filepath.Join(projectRoot, filepath.FromSlash(strings.Join(parts[:2], "/")))
+	}
+	return projectRoot
 }
 
 // cleanEmptyParents removes empty directories from dir up to (but not including) stopAt.
@@ -468,12 +496,24 @@ func cleanEmptyParents(dir, stopAt string) {
 
 func resolveProjectRoot(configPath string) string {
 	dir := filepath.Dir(configPath)
-	base := filepath.Base(dir)
-
-	// If config is inside .claude/ or .opencode/, project root is one level up
-	if base == ".claude" || base == ".opencode" {
-		return filepath.Dir(dir)
+	for _, configDir := range provider.ConfigDirs() {
+		if root, ok := projectRootForConfigDir(dir, configDir); ok {
+			return root
+		}
 	}
 
 	return dir
+}
+
+func projectRootForConfigDir(dir, configDir string) (string, bool) {
+	dir = filepath.Clean(dir)
+	configDir = filepath.Clean(configDir)
+	root := dir
+	for range strings.Split(configDir, string(os.PathSeparator)) {
+		root = filepath.Dir(root)
+	}
+	if filepath.Clean(filepath.Join(root, configDir)) == dir {
+		return root, true
+	}
+	return "", false
 }

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/GyroZepelix/loremaster/internal/provider"
 	"gopkg.in/yaml.v3"
 )
 
@@ -53,11 +54,6 @@ type SkillSource struct {
 	ParsedIncludes []IncludeEntry `yaml:"-"`
 }
 
-var validProviders = map[string]bool{
-	"claude":   true,
-	"opencode": true,
-}
-
 func Parse(r io.Reader) (*Config, error) {
 	var cfg Config
 	dec := yaml.NewDecoder(r)
@@ -70,8 +66,8 @@ func Parse(r io.Reader) (*Config, error) {
 	}
 	seen := make(map[string]bool)
 	for _, p := range cfg.Providers {
-		if !validProviders[p] {
-			return nil, fmt.Errorf("invalid provider %q: must be one of: claude, opencode", p)
+		if !provider.IsSupported(p) {
+			return nil, fmt.Errorf("invalid provider %q: must be one of: %s", p, provider.SupportedNames())
 		}
 		if seen[p] {
 			return nil, fmt.Errorf("duplicate provider %q", p)

@@ -199,7 +199,7 @@ func (s *Syncer) reconcileStale(desiredSkills map[string]bool) ([]string, error)
 		return nil, nil
 	}
 
-	skillsParent := filepath.Dir(s.Provider.SkillDir(s.ProjectRoot, "dummy"))
+	skillsParent := s.Provider.SkillRoot(s.ProjectRoot)
 
 	if _, err := os.Stat(skillsParent); os.IsNotExist(err) {
 		return nil, nil

@@ -115,6 +115,58 @@ func TestLocateProfile(t *testing.T) {
 		}
 	})
 
+	t.Run("dev profile found in .pi", func(t *testing.T) {
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, ".pi"), 0755)
+		os.WriteFile(filepath.Join(dir, ".pi", "lore-dev.yml"), []byte("test"), 0644)
+		got, err := LocateProfile(dir, "dev")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != filepath.Join(dir, ".pi", "lore-dev.yml") {
+			t.Errorf("got %q, want %q", got, filepath.Join(dir, ".pi", "lore-dev.yml"))
+		}
+	})
+
+	t.Run("dev profile found in .pi agent", func(t *testing.T) {
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, ".pi", "agent"), 0755)
+		os.WriteFile(filepath.Join(dir, ".pi", "agent", "lore-dev.yml"), []byte("test"), 0644)
+		got, err := LocateProfile(dir, "dev")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != filepath.Join(dir, ".pi", "agent", "lore-dev.yml") {
+			t.Errorf("got %q, want %q", got, filepath.Join(dir, ".pi", "agent", "lore-dev.yml"))
+		}
+	})
+
+	t.Run("dev profile found in .agents", func(t *testing.T) {
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, ".agents"), 0755)
+		os.WriteFile(filepath.Join(dir, ".agents", "lore-dev.yml"), []byte("test"), 0644)
+		got, err := LocateProfile(dir, "dev")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != filepath.Join(dir, ".agents", "lore-dev.yml") {
+			t.Errorf("got %q, want %q", got, filepath.Join(dir, ".agents", "lore-dev.yml"))
+		}
+	})
+
+	t.Run("dev profile found in .codex", func(t *testing.T) {
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, ".codex"), 0755)
+		os.WriteFile(filepath.Join(dir, ".codex", "lore-dev.yml"), []byte("test"), 0644)
+		got, err := LocateProfile(dir, "dev")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != filepath.Join(dir, ".codex", "lore-dev.yml") {
+			t.Errorf("got %q, want %q", got, filepath.Join(dir, ".codex", "lore-dev.yml"))
+		}
+	})
+
 	t.Run("dev profile not found", func(t *testing.T) {
 		dir := t.TempDir()
 		_, err := LocateProfile(dir, "dev")
