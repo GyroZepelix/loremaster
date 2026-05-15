@@ -7,10 +7,17 @@ import (
 
 func Detect(projectRoot string) ([]Provider, error) {
 	var detected []Provider
+	seen := make(map[string]bool)
 	for _, p := range All() {
-		markerPath := filepath.Join(projectRoot, p.MarkerDir())
-		if info, err := os.Stat(markerPath); err == nil && info.IsDir() {
-			detected = append(detected, p)
+		for _, marker := range p.MarkerDirs() {
+			markerPath := filepath.Join(projectRoot, marker)
+			if info, err := os.Stat(markerPath); err == nil && info.IsDir() {
+				if !seen[p.Name()] {
+					detected = append(detected, p)
+					seen[p.Name()] = true
+				}
+				break
+			}
 		}
 	}
 	return detected, nil

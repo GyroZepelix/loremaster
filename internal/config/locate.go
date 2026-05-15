@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"github.com/GyroZepelix/loremaster/internal/provider"
 )
 
 var profilePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
@@ -42,11 +44,7 @@ func LocateProfile(dir, profile string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	candidates := []string{
-		filepath.Join(dir, filename),
-		filepath.Join(dir, ".claude", filename),
-		filepath.Join(dir, ".opencode", filename),
-	}
+	candidates := configCandidates(dir, filename)
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
@@ -56,11 +54,7 @@ func LocateProfile(dir, profile string) (string, error) {
 }
 
 func Locate(dir string) (string, error) {
-	candidates := []string{
-		filepath.Join(dir, "lore.yml"),
-		filepath.Join(dir, ".claude", "lore.yml"),
-		filepath.Join(dir, ".opencode", "lore.yml"),
-	}
+	candidates := configCandidates(dir, "lore.yml")
 
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {
@@ -69,4 +63,12 @@ func Locate(dir string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no lore.yml found in %s (run 'lore init' first)", dir)
+}
+
+func configCandidates(dir, filename string) []string {
+	candidates := []string{filepath.Join(dir, filename)}
+	for _, configDir := range provider.ConfigDirs() {
+		candidates = append(candidates, filepath.Join(dir, configDir, filename))
+	}
+	return candidates
 }

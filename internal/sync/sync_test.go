@@ -1275,6 +1275,111 @@ func TestSync_MultiProvider_BothProviders(t *testing.T) {
 	}
 }
 
+func TestSync_MultiProvider_PiAndCodex(t *testing.T) {
+	projectDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	srcDir := createLocalSource(t, t.TempDir(), "foo")
+	includes := []string{"foo"}
+
+	cfg := &config.Config{
+		Providers: config.ProviderList{"pi", "codex"},
+		Skills: []config.SkillSource{
+			{
+				Source:         srcDir,
+				Include:        includes,
+				Type:           "soft",
+				ParsedIncludes: parsedIncludes(includes),
+			},
+		},
+	}
+
+	baseDirs := buildBaseDirs(srcDir)
+	for _, providerName := range cfg.Providers {
+		prov, err := provider.Get(providerName)
+		if err != nil {
+			t.Fatalf("provider.Get(%s): %v", providerName, err)
+		}
+		syncer := &Syncer{
+			GitFetcher:  &mockFetcher{},
+			Provider:    prov,
+			ProjectRoot: projectDir,
+		}
+		result, err := syncer.Sync(cfg, baseDirs)
+		if err != nil {
+			t.Fatalf("Sync %s: %v", providerName, err)
+		}
+		if result.Synced != 1 {
+			t.Errorf("%s synced = %d, want 1", providerName, result.Synced)
+		}
+	}
+
+	piSkill := filepath.Join(projectDir, ".pi", "skills", "foo")
+	if _, err := os.Lstat(piSkill); err != nil {
+		t.Error("skill not found in .pi/skills/foo")
+	}
+
+	codexSkill := filepath.Join(projectDir, ".agents", "skills", "foo")
+	if _, err := os.Lstat(codexSkill); err != nil {
+		t.Error("skill not found in .agents/skills/foo")
+	}
+
+	gitignoreContent, _ := os.ReadFile(filepath.Join(projectDir, ".gitignore"))
+	s := string(gitignoreContent)
+	if !containsLine(s, ".pi/skills/foo") {
+		t.Error("gitignore missing .pi/skills/foo")
+	}
+	if !containsLine(s, ".agents/skills/foo") {
+		t.Error("gitignore missing .agents/skills/foo")
+	}
+}
+
+func TestSync_PiGlobalSkillRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	srcDir := createLocalSource(t, t.TempDir(), "foo")
+	includes := []string{"foo"}
+	cfg := &config.Config{
+		Providers: config.ProviderList{"pi"},
+		Skills: []config.SkillSource{
+			{
+				Source:         srcDir,
+				Include:        includes,
+				Type:           "soft",
+				ParsedIncludes: parsedIncludes(includes),
+			},
+		},
+	}
+
+	prov, err := provider.Get("pi")
+	if err != nil {
+		t.Fatalf("provider.Get(pi): %v", err)
+	}
+	syncer := &Syncer{
+		GitFetcher:  &mockFetcher{},
+		Provider:    prov,
+		ProjectRoot: home,
+	}
+	result, err := syncer.Sync(cfg, buildBaseDirs(srcDir))
+	if err != nil {
+		t.Fatalf("Sync pi: %v", err)
+	}
+	if result.Synced != 1 {
+		t.Errorf("synced = %d, want 1", result.Synced)
+	}
+
+	skillPath := filepath.Join(home, ".pi", "agent", "skills", "foo")
+	if _, err := os.Lstat(skillPath); err != nil {
+		t.Error("skill not found in ~/.pi/agent/skills/foo")
+	}
+	if len(result.Entries) != 1 || result.Entries[0] != filepath.Join(".pi", "agent", "skills", "foo") {
+		t.Errorf("entries = %v, want [.pi/agent/skills/foo]", result.Entries)
+	}
+}
+
 func TestSync_FetchSources_CallCount(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
 

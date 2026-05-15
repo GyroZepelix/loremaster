@@ -98,6 +98,26 @@ skills:
 			},
 		},
 		{
+			name: "new providers accepted",
+			input: `
+provider: [pi, codex]
+skills:
+  - source: git@github.com:user/repo.git
+    include: [foo]
+`,
+			check: func(t *testing.T, cfg *Config) {
+				want := []string{"pi", "codex"}
+				if len(cfg.Providers) != len(want) {
+					t.Fatalf("providers = %v, want %v", cfg.Providers, want)
+				}
+				for i, w := range want {
+					if cfg.Providers[i] != w {
+						t.Errorf("providers[%d] = %q, want %q", i, cfg.Providers[i], w)
+					}
+				}
+			},
+		},
+		{
 			name:    "duplicate provider",
 			input:   "provider: [claude, claude]\nskills:\n  - source: x\n    include: [a]\n",
 			wantErr: "duplicate provider",
@@ -130,7 +150,7 @@ skills:
 		{
 			name:    "invalid provider scalar",
 			input:   "provider: cursor\nskills:\n  - source: x\n    include: [a]\n",
-			wantErr: "invalid provider",
+			wantErr: "claude, opencode, pi, codex",
 		},
 		{
 			name:    "empty skills",
@@ -378,6 +398,38 @@ func TestLocate(t *testing.T) {
 				os.WriteFile(filepath.Join(dir, ".opencode", "lore.yml"), []byte("provider: opencode\n"), 0644)
 			},
 			wantSub: ".opencode/lore.yml",
+		},
+		{
+			name: "lore.yml in .pi",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, ".pi"), 0755)
+				os.WriteFile(filepath.Join(dir, ".pi", "lore.yml"), []byte("provider: pi\n"), 0644)
+			},
+			wantSub: ".pi/lore.yml",
+		},
+		{
+			name: "lore.yml in .pi agent",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, ".pi", "agent"), 0755)
+				os.WriteFile(filepath.Join(dir, ".pi", "agent", "lore.yml"), []byte("provider: pi\n"), 0644)
+			},
+			wantSub: ".pi/agent/lore.yml",
+		},
+		{
+			name: "lore.yml in .agents",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, ".agents"), 0755)
+				os.WriteFile(filepath.Join(dir, ".agents", "lore.yml"), []byte("provider: codex\n"), 0644)
+			},
+			wantSub: ".agents/lore.yml",
+		},
+		{
+			name: "lore.yml in .codex",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, ".codex"), 0755)
+				os.WriteFile(filepath.Join(dir, ".codex", "lore.yml"), []byte("provider: codex\n"), 0644)
+			},
+			wantSub: ".codex/lore.yml",
 		},
 		{
 			name:    "not found",

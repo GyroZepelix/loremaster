@@ -34,7 +34,7 @@ flowchart LR
 **Key properties:**
 
 - **Declarative** — one YAML config per project (or per profile)
-- **Multi-provider** — sync skills to Claude Code, OpenCode, or both at once
+- **Multi-provider** — sync skills to Claude Code, OpenCode, Pi, Codex, or several at once
 - **Profile-aware** — maintain separate skill sets per profile (`lore-dev.yml`, `lore-review.yml`, etc.)
 - **Symlink-first** — upstream changes propagate automatically
 - **Cache-backed** — repos cloned once to `~/.local/share/loremaster/`
@@ -43,10 +43,14 @@ flowchart LR
 
 ## Supported Tools
 
-| Provider   | Skill Directory      |
-|------------|----------------------|
+| Provider    | Skill Directory      |
+|-------------|----------------------|
 | Claude Code | `.claude/skills/`   |
 | OpenCode    | `.opencode/skills/` |
+| Pi          | `.pi/skills/`       |
+| Codex       | `.agents/skills/`   |
+
+For global Pi sync from `~`, skills are written to `~/.pi/agent/skills/`.
 
 ## Installation
 
@@ -77,7 +81,7 @@ mv lore ~/.local/bin/
 ## Quick Start
 
 ```bash
-# 1. Navigate to a project that uses Claude Code or OpenCode
+# 1. Navigate to a project that uses Claude Code, OpenCode, Pi, or Codex
 cd ~/my-project
 
 # 2. Initialize — auto-detects your AI tool and writes a skeleton lore.yml
@@ -116,8 +120,8 @@ lore sync -p dev
 ### Multi-Provider Example
 
 ```yaml
-# lore.yml — sync skills to both Claude Code and OpenCode
-provider: [claude, opencode]
+# lore.yml — sync skills to several AI tools
+provider: [claude, opencode, pi, codex]
 skills:
   - source: git@github.com:you/your-skills.git
     ref: main
@@ -127,20 +131,20 @@ skills:
 
 ## Configuration
 
-`lore.yml` can live in your project root, `.claude/`, or `.opencode/`. Loremaster searches these locations relative to the current directory via `Locate()`.
+`lore.yml` can live in your project root or in a provider config directory (`.claude/`, `.opencode/`, `.pi/`, `.pi/agent/`, `.agents/`, `.codex/`). Loremaster searches these locations relative to the current directory via `Locate()`.
 
 ### Scope
 
-**Project scope** — Place `lore.yml` at the project root or inside `.claude/lore.yml` / `.opencode/lore.yml`. Run `lore sync` from the project directory.
+**Project scope** — Place `lore.yml` at the project root or inside a provider config directory. Run `lore sync` from the project directory.
 
-**Global scope** — Place `lore.yml` at `~/lore.yml` or `~/.claude/lore.yml` and run `lore sync` from `~`. The recommended location is `~/.claude/lore.yml` to keep your home directory clean. There is no automatic `~/` fallback — global scope works because `Locate()` searches relative to the directory you invoke `lore sync` from.
+**Global scope** — Place `lore.yml` at `~/lore.yml` or a supported provider config directory under `~`, then run `lore sync` from `~`. There is no automatic `~/` fallback — global scope works because `Locate()` searches relative to the directory you invoke `lore sync` from. Pi global sync targets `~/.pi/agent/skills/`; Codex global sync targets `~/.agents/skills/`.
 
 Note: there is no config merging between project and global. Each `lore sync` invocation uses exactly one config file. If no config file is found in any of the search locations, `lore sync` exits with an error.
 
 ### Schema
 
 ```yaml
-provider: claude                    # string or list: claude | opencode | [claude, opencode]
+provider: claude                    # string or list: claude | opencode | pi | codex | [claude, opencode, pi, codex]
 skills:
   - source: <git-url>              # required: any git-cloneable URL or local path
     ref: main                       # optional: branch, tag, or commit SHA (default: HEAD)
@@ -168,7 +172,7 @@ Profiles let you maintain separate skill sets for different workflows (e.g., dev
 Sync skills to multiple AI tool directories in one pass.
 
 - **Single provider:** `provider: claude` — backward compatible (v0.1.x format)
-- **Multiple providers:** `provider: [claude, opencode]` — skills are synced to both `.claude/skills/` and `.opencode/skills/`
+- **Multiple providers:** `provider: [claude, opencode, pi, codex]` — skills are synced to each provider's skill directory
 - **Two-phase sync:** git repos are fetched once, then skills are linked per-provider
 - `.gitignore` entries are created for all provider paths
 - Duplicate providers and empty lists are rejected at parse time
@@ -228,7 +232,7 @@ flowchart LR
 
 1. **Parse** — Reads the config file (`lore.yml` or `lore-<profile>.yml`) and validates it.
 2. **Fetch** — Clones new repos (or pulls existing ones) into `~/.local/share/loremaster/`. Checks out the specified ref. This happens once regardless of how many providers are configured.
-3. **Link** — For each provider, symlinks (or copies) each declared skill into the provider's skill directory (e.g., `.claude/skills/`, `.opencode/skills/`).
+3. **Link** — For each provider, symlinks (or copies) each declared skill into the provider's skill directory (e.g., `.claude/skills/`, `.opencode/skills/`, `.pi/skills/`, `.agents/skills/`).
 4. **Clean** — Removes stale skills from previous syncs that are no longer declared. When profiles are active, stale reconciliation is scoped to the manifest — only skills owned by the current profile are candidates for removal.
 5. **Gitignore** — Adds managed entries to `.gitignore` under a `# Managed by loremaster` section. Idempotent and non-destructive.
 
