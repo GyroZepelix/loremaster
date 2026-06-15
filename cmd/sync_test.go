@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,77 @@ func TestResolveProjectRoot_ProviderConfigDirs(t *testing.T) {
 			got := resolveProjectRoot(filepath.Join(root, tt.configSub))
 			if got != root {
 				t.Errorf("resolveProjectRoot = %q, want %q", got, root)
+			}
+		})
+	}
+}
+
+func TestRunSync_DiscoversPiConfigFromHome(t *testing.T) {
+	tests := []struct {
+		name      string
+		configDir string
+		profile   string
+	}{
+		{"default in .pi", ".pi", ""},
+		{"default in .pi agent", filepath.Join(".pi", "agent"), ""},
+		{"profile in .pi", ".pi", "dev"},
+		{"profile in .pi agent", filepath.Join(".pi", "agent"), "dev"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			sourceDir := filepath.Join(t.TempDir(), "source")
+			skillDir := filepath.Join(sourceDir, "foo")
+			if err := os.MkdirAll(skillDir, 0755); err != nil {
+				t.Fatalf("create skill dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Foo\n"), 0644); err != nil {
+				t.Fatalf("write skill: %v", err)
+			}
+
+			configName := "lore.yml"
+			if tt.profile != "" {
+				configName = fmt.Sprintf("lore-%s.yml", tt.profile)
+			}
+			configPath := filepath.Join(home, tt.configDir, configName)
+			if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+				t.Fatalf("create config dir: %v", err)
+			}
+			configContent := fmt.Sprintf("provider: pi\nskills:\n  - source: %q\n    include: [foo]\n", sourceDir)
+			if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+
+			oldWd, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("get wd: %v", err)
+			}
+			oldProfile, oldPrune := profileFlag, pruneFlag
+			t.Cleanup(func() {
+				profileFlag = oldProfile
+				pruneFlag = oldPrune
+				if err := os.Chdir(oldWd); err != nil {
+					t.Fatalf("restore wd: %v", err)
+				}
+			})
+
+			if err := os.Chdir(home); err != nil {
+				t.Fatalf("chdir home: %v", err)
+			}
+			profileFlag = tt.profile
+			pruneFlag = false
+
+			if err := runSync(nil, nil); err != nil {
+				t.Fatalf("runSync: %v", err)
+			}
+
+			skillPath := filepath.Join(home, ".pi", "agent", "skills", "foo")
+			if _, err := os.Lstat(skillPath); err != nil {
+				t.Fatalf("expected synced skill at %s: %v", skillPath, err)
 			}
 		})
 	}

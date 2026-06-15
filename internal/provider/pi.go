@@ -11,10 +11,19 @@ func (p *Pi) Name() string { return "pi" }
 
 func (p *Pi) SkillRoot(projectRoot string) string {
 	home, err := os.UserHomeDir()
-	if err == nil && home != "" && filepath.Clean(projectRoot) == filepath.Clean(home) {
+	if err == nil && home != "" && samePath(projectRoot, home) {
 		return filepath.Join(projectRoot, ".pi", "agent", "skills")
 	}
 	return filepath.Join(projectRoot, ".pi", "skills")
+}
+
+func samePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	realA, errA := filepath.EvalSymlinks(a)
+	realB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && filepath.Clean(realA) == filepath.Clean(realB)
 }
 
 func (p *Pi) SkillDir(projectRoot string, skillName string) string {
