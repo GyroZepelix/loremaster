@@ -2,10 +2,73 @@ package gitignore
 
 import (
 	"os"
+	"sort"
 	"strings"
 )
 
 const header = "# Managed by loremaster"
+
+func SetManagedEntries(gitignorePath string, entries []string) error {
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	unique := make(map[string]bool)
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry != "" && entry != header {
+			unique[entry] = true
+		}
+	}
+	desired := make([]string, 0, len(unique))
+	for entry := range unique {
+		desired = append(desired, entry)
+	}
+	sort.Strings(desired)
+
+	lines := strings.Split(string(content), "\n")
+	kept := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		if strings.TrimSpace(lines[i]) != header {
+			kept = append(kept, lines[i])
+			i++
+			continue
+		}
+		i++
+		for i < len(lines) {
+			trimmed := strings.TrimSpace(lines[i])
+			if trimmed == "" {
+				i++
+				break
+			}
+			if strings.HasPrefix(trimmed, "#") {
+				break
+			}
+			i++
+		}
+	}
+
+	base := strings.TrimRight(strings.Join(kept, "\n"), "\n")
+	var output strings.Builder
+	if base != "" {
+		output.WriteString(base)
+		if len(desired) > 0 {
+			output.WriteString("\n\n")
+		} else {
+			output.WriteString("\n")
+		}
+	}
+	if len(desired) > 0 {
+		output.WriteString(header)
+		output.WriteByte('\n')
+		for _, entry := range desired {
+			output.WriteString(entry)
+			output.WriteByte('\n')
+		}
+	}
+	return os.WriteFile(gitignorePath, []byte(output.String()), 0644)
+}
 
 func EnsureEntries(gitignorePath string, entries []string) error {
 	if len(entries) == 0 {
@@ -49,12 +112,12 @@ func EnsureEntries(gitignorePath string, entries []string) error {
 				continue
 			}
 			if inSection && !inserted {
-				// Still in managed section — keep going until we hit a blank or non-managed line
+				// Still in managed section - keep going until we hit a blank or non-managed line
 				if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
 					result = append(result, line)
 					continue
 				}
-				// End of managed section — insert new entries here
+				// End of managed section - insert new entries here
 				for _, entry := range toAdd {
 					result = append(result, entry)
 				}
@@ -77,7 +140,7 @@ func EnsureEntries(gitignorePath string, entries []string) error {
 		return os.WriteFile(gitignorePath, []byte(output), 0644)
 	}
 
-	// No header yet — append section at the end
+	// No header yet - append section at the end
 	var result strings.Builder
 	existingContent := strings.TrimRight(string(content), "\n")
 	if existingContent != "" {

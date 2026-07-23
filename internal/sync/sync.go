@@ -2,75 +2,78 @@ package sync
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/GyroZepelix/loremaster/internal/cache"
 	"github.com/GyroZepelix/loremaster/internal/config"
 	"github.com/GyroZepelix/loremaster/internal/git"
 	"github.com/GyroZepelix/loremaster/internal/gitignore"
+	"github.com/GyroZepelix/loremaster/internal/manifest"
 	"github.com/GyroZepelix/loremaster/internal/provider"
 )
 
 type Syncer struct {
-	GitFetcher  git.Fetcher
-	Provider    provider.Provider
-	ProjectRoot string
-	ProfileName string
-	// ManifestSnapshot holds the profile entries from the manifest BEFORE the
-	// current sync. Used by reconcileStale for ownership detection. Must be a
-	// copy, not an alias, of the manifest slice.
+	GitFetcher       git.Fetcher
+	Provider         provider.Provider
+	ProjectRoot      string
+	ProfileName      string
+	Manifest         *manifest.Manifest
 	ManifestSnapshot []string
+	Transactional    bool
 }
 
 type SyncResult struct {
 	Synced  int
-	Sources int
 	Errors  []string
-	// Entries captures the project-root-relative paths of all synced skills
-	// for this provider run.
 	Entries []string
+	Items   []manifest.Item
+	Removed []string
+	Changes []Change
 }
 
-// FetchSources resolves base directories for all skill sources. For git sources
-// it clones/pulls and optionally checks out a ref. For local sources it resolves
-// the absolute path. Each source is isolated: one failure does not block others.
 func FetchSources(fetcher git.Fetcher, sources []config.SkillSource) (map[string]string, []string) {
 	baseDirs := make(map[string]string)
 	var errs []string
-	for _, src := range sources {
-		if config.IsGitSource(src.Source) {
-			repoDir, err := cache.RepoDir(src.Source)
+	seen := make(map[string]bool)
+	for _, source := range sources {
+		if seen[source.Source] {
+			continue
+		}
+		seen[source.Source] = true
+		if config.IsGitSource(source.Source) {
+			repoDir, err := cache.RepoDir(source.Source)
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("error: resolve cache for %q: %s", src.Source, err))
+				errs = append(errs, fmt.Sprintf("error: resolve cache for %q: %s", source.Source, err))
 				continue
 			}
-			if err := fetcher.CloneOrPull(src.Source, repoDir); err != nil {
-				errs = append(errs, fmt.Sprintf("error: fetch %q: %s (check URL and authentication)", src.Source, err))
+			if err := fetcher.CloneOrPull(source.Source, repoDir); err != nil {
+				errs = append(errs, fmt.Sprintf("error: fetch %q: %s (check URL and authentication)", source.Source, err))
 				continue
 			}
-			if src.Ref != "" {
-				if err := fetcher.Checkout(repoDir, src.Ref); err != nil {
-					errs = append(errs, fmt.Sprintf("error: checkout ref %q for %q: %s", src.Ref, src.Source, err))
+			if source.Ref != "" {
+				if err := fetcher.Checkout(repoDir, source.Ref); err != nil {
+					errs = append(errs, fmt.Sprintf("error: checkout ref %q for %q: %s", source.Ref, source.Source, err))
 					continue
 				}
 			}
-			baseDirs[src.Source] = repoDir
-		} else {
-			absSource, err := filepath.Abs(src.Source)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("error: resolve local path %q: %s", src.Source, err))
-				continue
-			}
-			info, err := os.Stat(absSource)
-			if err != nil || !info.IsDir() {
-				errs = append(errs, fmt.Sprintf("error: local path %q does not exist or is not a directory", src.Source))
-				continue
-			}
-			baseDirs[src.Source] = absSource
+			baseDirs[source.Source] = repoDir
+			continue
 		}
+
+		absSource, err := filepath.Abs(source.Source)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("error: resolve local path %q: %s", source.Source, err))
+			continue
+		}
+		info, err := os.Stat(absSource)
+		if err != nil || !info.IsDir() {
+			errs = append(errs, fmt.Sprintf("error: local path %q does not exist or is not a directory", source.Source))
+			continue
+		}
+		baseDirs[source.Source] = absSource
 	}
 	return baseDirs, errs
 }
@@ -79,255 +82,439 @@ func (s *Syncer) Sync(cfg *config.Config, baseDirs map[string]string) (*SyncResu
 	if s.Provider == nil {
 		return nil, fmt.Errorf("provider must be set before calling Sync()")
 	}
-
 	if err := cache.EnsureDir(); err != nil {
 		return nil, fmt.Errorf("create cache directory: %w", err)
 	}
 
-	// Collect desired skill set and detect collisions using ParsedIncludes
-	type skillOrigin struct {
-		src    string // entry.Src
-		source string // SkillSource.Source
-	}
-	desiredSkills := make(map[string]bool)
-	skillSource := make(map[string]skillOrigin) // entry.Dst -> first origin
-	for _, src := range cfg.Skills {
-		for _, entry := range src.ParsedIncludes {
-			if prev, exists := skillSource[entry.Dst]; exists {
-				fmt.Fprintf(os.Stderr, "warning: destination %q (from %q in %q) conflicts with %q in %q — last source wins\n",
-					entry.Dst, entry.Src, src.Source, prev.src, prev.source)
-			}
-			skillSource[entry.Dst] = skillOrigin{src: entry.Src, source: src.Source}
-			desiredSkills[entry.Dst] = true
-		}
-	}
-
-	// Cross-source overlap detection
-	var allEntries []config.IncludeEntry
-	for _, src := range cfg.Skills {
-		allEntries = append(allEntries, src.ParsedIncludes...)
-	}
-	if err := config.ValidateOverlaps(allEntries); err != nil {
-		return nil, fmt.Errorf("cross-source overlap: %w", err)
-	}
-
-	result := &SyncResult{Sources: len(cfg.Skills)}
-	var syncedEntries []string
-
-	for _, src := range cfg.Skills {
-		srcBaseDirs, ok := baseDirs[src.Source]
-		if !ok {
-			result.Errors = append(result.Errors, fmt.Sprintf("error: no base directory for source %q (fetch may have failed)", src.Source))
-			continue
-		}
-		skillErrors, err := s.syncSource(src, srcBaseDirs, &syncedEntries)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("error: sync failed for source %q: %s", src.Source, err))
-			continue
-		}
-		for _, skillErr := range skillErrors {
-			result.Errors = append(result.Errors, skillErr)
-		}
-	}
-
-	result.Synced = len(syncedEntries)
-	result.Entries = syncedEntries
-
-	// Reconcile stale skills
-	staleEntries, err := s.reconcileStale(desiredSkills)
+	resources, err := prepareResources(cfg)
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("reconcile stale: %s", err))
+		return nil, err
 	}
+	result := &SyncResult{}
+	desired := make(map[string]bool)
 
-	// Update gitignore
-	gitignorePath := filepath.Join(s.ProjectRoot, ".gitignore")
-	if len(syncedEntries) > 0 {
-		if err := gitignore.EnsureEntries(gitignorePath, syncedEntries); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("update gitignore: %s", err))
+	for _, resource := range resources {
+		for _, source := range resource.Sources {
+			for _, entry := range source.ParsedIncludes {
+				dst := s.Provider.ResourceDir(s.ProjectRoot, resource.Name, entry.Dst)
+				rel, relErr := filepath.Rel(s.ProjectRoot, dst)
+				if relErr != nil {
+					return nil, fmt.Errorf("resolve destination for %s/%s: %w", resource.Name, entry.Dst, relErr)
+				}
+				desired[filepath.ToSlash(filepath.Clean(rel))] = true
+			}
 		}
 	}
-	if len(staleEntries) > 0 {
-		if err := gitignore.RemoveEntries(gitignorePath, staleEntries); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("cleanup gitignore: %s", err))
+
+	for _, resource := range resources {
+		for _, source := range resource.Sources {
+			baseDir, ok := baseDirs[source.Source]
+			if !ok {
+				for _, entry := range source.ParsedIncludes {
+					s.recordItemError(resource.Name, source, entry, result, "source fetch or resolution failed")
+				}
+				continue
+			}
+			for _, entry := range source.ParsedIncludes {
+				s.syncItem(resource.Name, source, entry, baseDir, result)
+			}
 		}
 	}
 
+	s.reconcileStale(desired, result)
+	sort.Strings(result.Entries)
+	sort.Slice(result.Items, func(i, j int) bool { return result.Items[i].Path < result.Items[j].Path })
+	sort.Strings(result.Removed)
+	result.Synced = len(result.Items)
+
+	if s.Manifest == nil {
+		s.updateLegacyGitignore(result)
+	}
 	if len(result.Errors) > 0 {
 		return result, fmt.Errorf("sync completed with %d error(s)", len(result.Errors))
 	}
-
 	return result, nil
 }
 
-func (s *Syncer) syncSource(src config.SkillSource, baseDir string, syncedEntries *[]string) ([]string, error) {
-	linkType := src.Type
-	if linkType == "" {
-		linkType = "soft"
-	}
-
-	var skillErrors []string
-	for _, entry := range src.ParsedIncludes {
-		srcPath := filepath.Join(baseDir, entry.Src)
-		if info, err := os.Stat(srcPath); err != nil || !info.IsDir() {
-			skillErrors = append(skillErrors, fmt.Sprintf("error: skill %q from source %q: not found (expected directory at %q, verify include list)", entry.Src, src.Source, srcPath))
-			continue
+func prepareResources(cfg *config.Config) ([]config.Resource, error) {
+	resources := cfg.AllResources()
+	prepared := make([]config.Resource, len(resources))
+	var destinations []config.IncludeEntry
+	for i, resource := range resources {
+		prepared[i] = config.Resource{Name: resource.Name, Sources: make([]config.SkillSource, len(resource.Sources))}
+		copy(prepared[i].Sources, resource.Sources)
+		for j := range prepared[i].Sources {
+			source := &prepared[i].Sources[j]
+			if source.Type == "" {
+				source.Type = "soft"
+			}
+			if len(source.ParsedIncludes) == 0 {
+				for _, raw := range source.Include {
+					entry, err := config.ParseIncludeEntry(raw)
+					if err != nil {
+						return nil, fmt.Errorf("resource %q: %w", resource.Name, err)
+					}
+					source.ParsedIncludes = append(source.ParsedIncludes, entry)
+				}
+			}
+			for _, entry := range source.ParsedIncludes {
+				destinations = append(destinations, config.IncludeEntry{Src: entry.Src, Dst: filepath.ToSlash(filepath.Join(resource.Name, entry.Dst))})
+			}
 		}
-
-		dstPath := s.Provider.SkillDir(s.ProjectRoot, entry.Dst)
-
-		if err := LinkSkill(srcPath, dstPath, linkType); err != nil {
-			skillErrors = append(skillErrors, fmt.Sprintf("error: skill %q from source %q: %s (check filesystem permissions)", entry.Dst, src.Source, err))
-			continue
-		}
-
-		// Compute gitignore entry relative to project root
-		relPath, _ := filepath.Rel(s.ProjectRoot, dstPath)
-		*syncedEntries = append(*syncedEntries, relPath)
 	}
-
-	return skillErrors, nil
+	if err := config.ValidateOverlaps(destinations); err != nil {
+		return nil, fmt.Errorf("cross-resource overlap: %w", err)
+	}
+	return prepared, nil
 }
 
-// reconcileStale removes skills that are in the manifest snapshot but not in
-// the desired set. Detection is manifest-driven: if an entry is in
-// ManifestSnapshot and not in desiredSkills, it is stale. Filesystem type
-// checks (symlink, .lore-checksum) serve as safety verification.
-func (s *Syncer) reconcileStale(desiredSkills map[string]bool) ([]string, error) {
-	// First-run guard: empty snapshot means nothing to reconcile.
-	// This collapses "no manifest" and "empty profile" into one path.
-	if len(s.ManifestSnapshot) == 0 {
-		return nil, nil
+func (s *Syncer) syncItem(resource string, source config.SkillSource, entry config.IncludeEntry, baseDir string, result *SyncResult) {
+	srcPath := filepath.Join(baseDir, entry.Src)
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		s.recordItemError(resource, source, entry, result, fmt.Sprintf("source path %q was not found", srcPath))
+		return
+	}
+	if resource == "skills" && !info.IsDir() {
+		s.recordItemError(resource, source, entry, result, fmt.Sprintf("expected skill directory at %q", srcPath))
+		return
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		s.recordItemError(resource, source, entry, result, fmt.Sprintf("source path %q is not a regular file or directory", srcPath))
+		return
 	}
 
-	skillsParent := s.Provider.SkillRoot(s.ProjectRoot)
-
-	if _, err := os.Stat(skillsParent); os.IsNotExist(err) {
-		return nil, nil
+	dstPath := s.Provider.ResourceDir(s.ProjectRoot, resource, entry.Dst)
+	relPath := s.relativeDestination(resource, entry.Dst)
+	if err := ensureNoSymlinkedParents(s.ProjectRoot, dstPath); err != nil {
+		s.recordItemError(resource, source, entry, result, err.Error())
+		return
+	}
+	managed, ownershipErr := s.managedState(relPath)
+	if ownershipErr != nil {
+		s.recordItemError(resource, source, entry, result, ownershipErr.Error())
+		return
+	}
+	var linked LinkResult
+	if s.Transactional {
+		linked, err = LinkItemTransactional(srcPath, dstPath, source.Type, managed)
+	} else {
+		linked, err = LinkItem(srcPath, dstPath, source.Type, managed)
+	}
+	if err != nil {
+		s.recordItemError(resource, source, entry, result, err.Error())
+		return
 	}
 
-	// Build set of profile-owned entries from the snapshot.
-	// Cross-provider entries produce ../.. relative paths via filepath.Rel,
-	// which never match WalkDir results. This implicitly filters ownedEntries
-	// to only the current provider's entries.
-	ownedEntries := make(map[string]bool, len(s.ManifestSnapshot))
-	for _, e := range s.ManifestSnapshot {
-		// Manifest entries are project-root-relative (e.g. ".claude/skills/brainstorm")
-		// Convert to skillsParent-relative for comparison with WalkDir results
-		rel, err := filepath.Rel(skillsParent, filepath.Join(s.ProjectRoot, e))
-		if err == nil {
-			ownedEntries[rel] = true
+	item := manifest.Item{
+		Path:            relPath,
+		Provider:        s.Provider.Name(),
+		Resource:        resource,
+		Mode:            linked.Mode,
+		Kind:            linked.Kind,
+		Checksum:        linked.Checksum,
+		ChecksumVersion: linked.ChecksumVersion,
+		Target:          linked.Target,
+	}
+	result.Entries = append(result.Entries, relPath)
+	result.Items = append(result.Items, item)
+	if linked.Change != nil {
+		result.Changes = append(result.Changes, *linked.Change)
+	}
+}
+
+func (s *Syncer) recordItemError(resource string, source config.SkillSource, entry config.IncludeEntry, result *SyncResult, detail string) {
+	rel := s.relativeDestination(resource, entry.Dst)
+	result.Errors = append(result.Errors, fmt.Sprintf("error: provider %q resource %q item %q from %q to %q: %s", s.Provider.Name(), resource, entry.Src, source.Source, rel, detail))
+}
+
+func (s *Syncer) relativeDestination(resource string, destination string) string {
+	path := s.Provider.ResourceDir(s.ProjectRoot, resource, destination)
+	rel, _ := filepath.Rel(s.ProjectRoot, path)
+	return filepath.ToSlash(filepath.Clean(rel))
+}
+
+func (s *Syncer) managedState(path string) (*ManagedState, error) {
+	profile := s.ProfileName
+	if profile == "" {
+		profile = "default"
+	}
+	if s.Manifest != nil {
+		owners := s.Manifest.Owners(path)
+		if len(owners) == 0 {
+			return nil, nil
+		}
+		if len(owners) != 1 || owners[0] != profile {
+			return nil, fmt.Errorf("destination is owned by profile(s) %q", strings.Join(owners, ", "))
+		}
+		_, item, _ := s.Manifest.Owner(path)
+		return &ManagedState{Mode: item.Mode, Kind: item.Kind, Checksum: item.Checksum, ChecksumVersion: item.ChecksumVersion, Target: item.Target, Legacy: item.Legacy}, nil
+	}
+	for _, entry := range s.ManifestSnapshot {
+		if filepath.Clean(entry) == filepath.Clean(path) {
+			return &ManagedState{Legacy: true}, nil
 		}
 	}
+	return nil, nil
+}
 
-	var staleEntries []string
-	var stalePaths []string // absolute paths of removed leaves, for parent cleanup
+func (s *Syncer) previousItems() []manifest.Item {
+	profile := s.ProfileName
+	if profile == "" {
+		profile = "default"
+	}
+	if s.Manifest != nil {
+		items, _ := s.Manifest.GetProfileItems(profile)
+		return items
+	}
+	items := make([]manifest.Item, 0, len(s.ManifestSnapshot))
+	for _, path := range s.ManifestSnapshot {
+		items = append(items, manifest.Item{Path: path, Provider: s.Provider.Name(), Resource: "skills", Legacy: true})
+	}
+	return items
+}
 
-	err := filepath.WalkDir(skillsParent, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Broken symlinks cause WalkDir errors — attempt cleanup if owned and stale
-			if info, lstatErr := os.Lstat(path); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
-				rel, _ := filepath.Rel(skillsParent, path)
-				if ownedEntries[rel] && !desiredSkills[rel] {
-					if rmErr := os.Remove(path); rmErr == nil {
-						relFromRoot, _ := filepath.Rel(s.ProjectRoot, path)
-						staleEntries = append(staleEntries, relFromRoot)
-						stalePaths = append(stalePaths, path)
-					}
+func (s *Syncer) reconcileStale(desired map[string]bool, result *SyncResult) {
+	configRoot := s.Provider.ConfigRoot(s.ProjectRoot)
+	profile := s.ProfileName
+	if profile == "" {
+		profile = "default"
+	}
+	for _, item := range s.previousItems() {
+		if desired[filepath.ToSlash(filepath.Clean(filepath.FromSlash(item.Path)))] || !pathWithinRoot(s.ProjectRoot, configRoot, item.Path) {
+			continue
+		}
+		shared := false
+		if s.Manifest != nil {
+			for _, owner := range s.Manifest.Owners(item.Path) {
+				if owner != profile {
+					shared = true
+					break
 				}
-			} else {
-				fmt.Fprintf(os.Stderr, "warning: reconcile walk: %s\n", err)
 			}
-			return nil
 		}
-		if path == skillsParent {
-			return nil
+		if shared {
+			result.Removed = append(result.Removed, item.Path)
+			continue
 		}
-
-		rel, _ := filepath.Rel(skillsParent, path)
-
-		// Skip desired skills entirely
-		if desiredSkills[rel] {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-
-		// Check for symlinks (Lstat needed since WalkDir follows symlinks)
-		info, lstatErr := os.Lstat(path)
-		if lstatErr != nil {
-			return nil
-		}
-
-		if info.Mode()&os.ModeSymlink != 0 {
-			if !ownedEntries[rel] {
-				return nil // Not in manifest — not managed by loremaster
-			}
-			if desiredSkills[rel] {
-				return nil // Still desired — defense-in-depth
-			}
-			// Stale managed symlink — remove
-			if err := os.Remove(path); err != nil {
-				return fmt.Errorf("remove stale symlink %q: %w", path, err)
-			}
-			relFromRoot, _ := filepath.Rel(s.ProjectRoot, path)
-			staleEntries = append(staleEntries, relFromRoot)
-			stalePaths = append(stalePaths, path)
-			return nil
-		}
-
-		if d.IsDir() {
-			checksumFile := filepath.Join(path, ".lore-checksum")
-			storedChecksum, readErr := os.ReadFile(checksumFile)
-			if readErr != nil {
-				return nil // No checksum — not managed, continue walking
-			}
-			if !ownedEntries[rel] {
-				return fs.SkipDir // Managed but not owned by this profile
-			}
-			if desiredSkills[rel] {
-				return fs.SkipDir // Still desired
-			}
-			// Verify checksum before removing
-			currentChecksum, err := ComputeDirChecksum(path)
+		if s.Transactional {
+			change, err := StageRemoveManagedItem(s.ProjectRoot, item)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: skipping %q: could not verify checksum: %s\n", rel, err)
-				return fs.SkipDir
+				fmt.Fprintf(os.Stderr, "warning: preserving %q: %s\n", item.Path, err)
+				continue
 			}
-			if strings.TrimSpace(string(storedChecksum)) != currentChecksum {
-				fmt.Fprintf(os.Stderr, "warning: skipping %q: local modifications detected\n", rel)
-				return fs.SkipDir
+			if change != nil {
+				result.Changes = append(result.Changes, *change)
 			}
-			if err := os.RemoveAll(path); err != nil {
-				return fmt.Errorf("remove stale hard copy %q: %w", path, err)
+		} else {
+			if err := RemoveManagedItem(s.ProjectRoot, item); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: preserving %q: %s\n", item.Path, err)
+				continue
 			}
-			relFromRoot, _ := filepath.Rel(s.ProjectRoot, path)
-			staleEntries = append(staleEntries, relFromRoot)
-			stalePaths = append(stalePaths, path)
-			return fs.SkipDir
+			cleanEmptyParents(filepath.Dir(filepath.Join(s.ProjectRoot, item.Path)), configRoot)
+		}
+		result.Removed = append(result.Removed, item.Path)
+	}
+}
+
+func pathWithinRoot(projectRoot string, root string, relativePath string) bool {
+	absolute := filepath.Clean(filepath.Join(projectRoot, filepath.FromSlash(relativePath)))
+	rel, err := filepath.Rel(root, absolute)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func RemoveManagedItem(projectRoot string, item manifest.Item) error {
+	_, err := removeManagedItem(projectRoot, item, false)
+	return err
+}
+
+func StageRemoveManagedItem(projectRoot string, item manifest.Item) (*Change, error) {
+	return removeManagedItem(projectRoot, item, true)
+}
+
+func removeManagedItem(projectRoot string, item manifest.Item, transactional bool) (*Change, error) {
+	cleanedPath := filepath.Clean(filepath.FromSlash(item.Path))
+	if item.Path == "" || filepath.IsAbs(cleanedPath) || cleanedPath == "." || cleanedPath == ".." || strings.HasPrefix(cleanedPath, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("invalid managed path %q", item.Path)
+	}
+	prov, err := provider.Get(item.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("invalid managed provider %q", item.Provider)
+	}
+	resource, err := config.ValidateResourceName(item.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("invalid managed resource %q", item.Resource)
+	}
+	path := filepath.Clean(filepath.Join(projectRoot, cleanedPath))
+	resourceRoot := filepath.Join(prov.ConfigRoot(projectRoot), filepath.FromSlash(resource))
+	rel, err := filepath.Rel(resourceRoot, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("managed path %q is outside its provider resource root", item.Path)
+	}
+	if err := ensureNoSymlinkedParents(projectRoot, path); err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	state := &ManagedState{Mode: item.Mode, Kind: item.Kind, Checksum: item.Checksum, ChecksumVersion: item.ChecksumVersion, Target: item.Target, Legacy: item.Legacy}
+	if err := verifyManagedDestination(path, state); err != nil {
+		return nil, err
+	}
+	if !transactional {
+		return nil, os.RemoveAll(path)
+	}
+	backup, err := reserveSiblingPath(filepath.Dir(path), ".lore-remove-")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Rename(path, backup); err != nil {
+		return nil, err
+	}
+	return &Change{Destination: path, Backup: backup, CleanupStop: prov.ConfigRoot(projectRoot)}, nil
+}
+
+func ensureNoSymlinkedParents(projectRoot string, destination string) error {
+	parent := filepath.Dir(destination)
+	rel, err := filepath.Rel(projectRoot, parent)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("destination %q is outside project root", destination)
+	}
+	if rel == "." {
+		return nil
+	}
+	current := filepath.Clean(projectRoot)
+	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect destination parent %q: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("destination parent %q is a symlink", current)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("destination parent %q is not a directory", current)
+		}
+	}
+	return nil
+}
+
+func InspectLegacyItem(projectRoot string, item manifest.Item) (manifest.Item, error) {
+	path := filepath.Join(projectRoot, item.Path)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return item, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		item.Mode = "soft"
+		item.Target, err = os.Readlink(path)
+		if err != nil {
+			return item, err
+		}
+		targetInfo, err := os.Stat(path)
+		if err != nil {
+			return item, err
+		}
+		if targetInfo.IsDir() {
+			item.Kind = "directory"
+		} else if targetInfo.Mode().IsRegular() {
+			item.Kind = "file"
+		} else {
+			return item, fmt.Errorf("symlink target is not a regular file or directory")
+		}
+		item.Legacy = false
+		return item, nil
+	}
+	if !info.IsDir() {
+		return item, fmt.Errorf("legacy entry is not a managed symlink or directory")
+	}
+	stored, err := os.ReadFile(filepath.Join(path, ".lore-checksum"))
+	if err != nil {
+		return item, fmt.Errorf("legacy directory has no checksum")
+	}
+	item.Mode = "hard"
+	item.Kind = "directory"
+	item.Checksum = strings.TrimSpace(string(stored))
+	item.ChecksumVersion = 1
+	item.Legacy = false
+	legacyCurrent, err := computeLegacyDirChecksum(path)
+	if err != nil {
+		return item, err
+	}
+	if item.Checksum != legacyCurrent {
+		return item, fmt.Errorf("legacy directory has local modifications")
+	}
+	ambiguous, err := legacyTreeHasUnverifiableEntries(path)
+	if err != nil {
+		return item, err
+	}
+	if ambiguous {
+		return item, fmt.Errorf("legacy directory contains symlinks or empty directories that cannot be verified")
+	}
+	item.Checksum, err = ComputeDirChecksum(path)
+	if err != nil {
+		return item, err
+	}
+	item.ChecksumVersion = currentChecksumVersion
+	return item, nil
+}
+
+func legacyTreeHasUnverifiableEntries(root string) (bool, error) {
+	ambiguous := false
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			ambiguous = true
+			return nil
+		}
+		if path != root && entry.IsDir() {
+			children, err := os.ReadDir(path)
+			if err != nil {
+				return err
+			}
+			if len(children) == 0 {
+				ambiguous = true
+			}
 		}
 		return nil
 	})
-	if err != nil {
-		return staleEntries, err
-	}
+	return ambiguous, err
+}
 
-	// Clean up empty parent directories bottom-up
-	cleanedDirs := make(map[string]bool)
-	for _, stalePath := range stalePaths {
-		dir := filepath.Dir(stalePath)
-		for dir != skillsParent && !cleanedDirs[dir] {
-			cleanedDirs[dir] = true
-			entries, err := os.ReadDir(dir)
-			if err != nil || len(entries) > 0 {
-				break
-			}
-			if err := os.Remove(dir); err != nil {
-				break
-			}
-			dir = filepath.Dir(dir)
+func (s *Syncer) updateLegacyGitignore(result *SyncResult) {
+	path := filepath.Join(s.ProjectRoot, ".gitignore")
+	if len(result.Entries) > 0 {
+		if err := gitignore.EnsureEntries(path, result.Entries); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("update gitignore: %s", err))
 		}
 	}
+	if len(result.Removed) > 0 {
+		if err := gitignore.RemoveEntries(path, result.Removed); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("cleanup gitignore: %s", err))
+		}
+	}
+}
 
-	return staleEntries, nil
+func cleanEmptyParents(dir string, stopAt string) {
+	dir = filepath.Clean(dir)
+	stopAt = filepath.Clean(stopAt)
+	for dir != stopAt && dir != filepath.Dir(dir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) > 0 {
+			return
+		}
+		if err := os.Remove(dir); err != nil {
+			return
+		}
+		dir = filepath.Dir(dir)
+	}
 }

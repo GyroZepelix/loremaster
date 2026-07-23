@@ -9,8 +9,8 @@ import (
 
 func TestNew(t *testing.T) {
 	m := New()
-	if m.Version != 1 {
-		t.Fatalf("Version = %d, want 1", m.Version)
+	if m.Version != CurrentVersion {
+		t.Fatalf("Version = %d, want %d", m.Version, CurrentVersion)
 	}
 	if m.Profiles == nil {
 		t.Fatal("Profiles is nil, want initialized map")
@@ -38,8 +38,8 @@ func TestLoadManifest(t *testing.T) {
 				return p
 			},
 			check: func(t *testing.T, m *Manifest) {
-				if m.Version != 1 {
-					t.Fatalf("Version = %d, want 1", m.Version)
+				if m.Version != CurrentVersion {
+					t.Fatalf("Version = %d, want %d", m.Version, CurrentVersion)
 				}
 				if len(m.Profiles) != 2 {
 					t.Fatalf("len(Profiles) = %d, want 2", len(m.Profiles))
@@ -103,8 +103,11 @@ func TestSaveManifest(t *testing.T) {
 	path := filepath.Join(dir, "manifest.yml")
 
 	m := New()
-	m.Profiles["default"] = []string{".claude/skills/brainstorm", ".claude/skills/commit"}
-	m.Profiles["dev"] = []string{".claude/skills/debug-tool"}
+	m.SetProfileItems("default", []Item{
+		{Path: ".claude/skills/brainstorm", Provider: "claude", Resource: "skills", Mode: "soft", Kind: "directory", Target: "/cache/brainstorm"},
+		{Path: ".claude/skills/commit", Provider: "claude", Resource: "skills", Mode: "soft", Kind: "directory", Target: "/cache/commit"},
+	})
+	m.SetProfileItems("dev", []Item{{Path: ".claude/skills/debug-tool", Provider: "claude", Resource: "skills", Mode: "soft", Kind: "directory", Target: "/cache/debug-tool"}})
 
 	if err := Save(path, m); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -132,8 +135,11 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 	path := filepath.Join(dir, "manifest.yml")
 
 	original := New()
-	original.Profiles["default"] = []string{".claude/skills/brainstorm", ".claude/skills/commit"}
-	original.Profiles["dev"] = []string{".claude/skills/debug-tool"}
+	original.SetProfileItems("default", []Item{
+		{Path: ".claude/skills/brainstorm", Provider: "claude", Resource: "skills", Mode: "soft", Kind: "directory", Target: "/cache/brainstorm"},
+		{Path: ".claude/skills/commit", Provider: "claude", Resource: "skills", Mode: "soft", Kind: "directory", Target: "/cache/commit"},
+	})
+	original.SetProfileItems("dev", []Item{{Path: ".claude/skills/debug-tool", Provider: "claude", Resource: "skills", Mode: "soft", Kind: "directory", Target: "/cache/debug-tool"}})
 
 	if err := Save(path, original); err != nil {
 		t.Fatalf("Save() error = %v", err)

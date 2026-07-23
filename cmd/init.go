@@ -53,7 +53,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	case 1:
 		selected = detected[0]
 	case 0:
-		// No provider directories found — let user choose which to set up
+		// No provider directories found - let user choose which to set up
 		all := provider.All()
 		fmt.Println("No AI tool directory detected. Select a provider to initialize:")
 		for i, p := range all {
@@ -73,7 +73,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("create %s directory: %w", defaultDir, err)
 		}
 	default:
-		// Multiple providers — prompt user
+		// Multiple providers - prompt user
 		fmt.Println("Multiple AI tools detected. Select a provider:")
 		for i, p := range detected {
 			fmt.Printf("  [%d] %s\n", i+1, p.Name())
@@ -89,10 +89,18 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// Generate skeleton config
 	skeleton := fmt.Sprintf(`provider: %s
 skills:
-  # - source: git@github.com:user/skills-repo.git
+  # - source: git@github.com:user/agent-resources.git
   #   ref: main
   #   include: [skill-name, path/to/skill]
   #   type: soft
+
+# Any other top-level key is a literal provider-relative resource path.
+# prompts:
+#   - source: git@github.com:user/agent-resources.git
+#     include: [review.md]
+# hooks/tools:
+#   - source: git@github.com:user/agent-resources.git
+#     include: [validate.sh:check.sh]
 `, selected.Name())
 
 	configPath := filepath.Join(cwd, configFileName)

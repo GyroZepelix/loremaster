@@ -7,6 +7,8 @@ import (
 
 type Provider interface {
 	Name() string
+	ConfigRoot(projectRoot string) string
+	ResourceDir(projectRoot string, resource string, item string) string
 	SkillRoot(projectRoot string) string
 	SkillDir(projectRoot string, skillName string) string
 	ConfigDirs() []string

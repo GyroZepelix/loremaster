@@ -7,6 +7,32 @@ import (
 	"testing"
 )
 
+func TestSetManagedEntriesSortsAndDeduplicates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".gitignore")
+	initial := "user.log\n\n# Managed by loremaster\nz/path\na/path\na/path\n\n# User section\nkeep.me\n"
+	if err := os.WriteFile(path, []byte(initial), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetManagedEntries(path, []string{"b/path", "a/path", "b/path"}); err != nil {
+		t.Fatalf("SetManagedEntries: %v", err)
+	}
+	entries, err := ManagedEntries(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0] != "a/path" || entries[1] != "b/path" {
+		t.Fatalf("entries = %v, want [a/path b/path]", entries)
+	}
+	content, _ := os.ReadFile(path)
+	if !strings.Contains(string(content), "user.log") || !strings.Contains(string(content), "# User section\nkeep.me") {
+		t.Fatalf("user content was not preserved:\n%s", content)
+	}
+	if strings.Count(string(content), header) != 1 {
+		t.Fatalf("managed header count = %d", strings.Count(string(content), header))
+	}
+}
+
 func TestEnsureEntries_NewFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".gitignore")

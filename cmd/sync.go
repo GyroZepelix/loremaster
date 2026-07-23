@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/GyroZepelix/loremaster/internal/cache"
@@ -23,13 +24,13 @@ var (
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Sync skills from configured sources",
+	Short: "Sync resources from configured sources",
 	RunE:  runSync,
 }
 
 func init() {
 	syncCmd.Flags().StringVarP(&profileFlag, "profile", "p", "", "sync a named profile (reads lore-<profile>.yml)")
-	syncCmd.Flags().BoolVar(&pruneFlag, "prune", false, "remove skills from orphaned profiles")
+	syncCmd.Flags().BoolVar(&pruneFlag, "prune", false, "remove resources from orphaned profiles")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -53,8 +54,11 @@ func runSync(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("load manifest: %w", err)
 		}
 		if mf == nil {
-			fmt.Println("no manifest found — nothing to prune")
+			fmt.Println("no manifest found - nothing to prune")
 			return nil
+		}
+		if err := migrateLegacyEntries(mf, projectRoot); err != nil {
+			return fmt.Errorf("migrate legacy manifest: %w", err)
 		}
 		return pruneOrphaned(mf, projectRoot, manifestPath, gitignorePath)
 	}
@@ -88,13 +92,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 		profileName = "default"
 	}
 
-	// Load manifest (returns nil, nil for missing/corrupt)
+	manifestExisted := manifest.Exists(manifestPath)
 	mf, err := manifest.Load(manifestPath)
 	if err != nil {
 		return fmt.Errorf("load manifest: %w", err)
 	}
-	if manifest.Exists(manifestPath) && mf == nil {
-		fmt.Fprintln(os.Stderr, "warning: .lore-manifest.yml is corrupted — proceeding without it (re-sync profiles to rebuild)")
+	if manifestExisted && mf == nil {
+		fmt.Fprintln(os.Stderr, "warning: .lore-manifest.yml is corrupted - proceeding without it (re-sync profiles to rebuild)")
 	}
 
 	// Orphan warning if manifest exists
@@ -105,102 +109,206 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Phase 1: fetch sources once
+	allSources := cfg.AllSources()
 	fetcher := &git.ExecGitFetcher{}
-	baseDirs, fetchErrs := loresync.FetchSources(fetcher, cfg.Skills)
-	for _, e := range fetchErrs {
-		fmt.Fprintln(os.Stderr, e)
+	baseDirs, fetchErrs := loresync.FetchSources(fetcher, allSources)
+	for _, fetchErr := range fetchErrs {
+		fmt.Fprintln(os.Stderr, fetchErr)
 	}
 
-	// Always create manifest
 	if mf == nil {
 		mf = manifest.New()
-		// Retroactively register default profile's existing entries
-		if err := retroRegisterDefault(mf, cfg, projectRoot); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: retroactive default profile registration: %s\n", err)
+		if !manifestExisted {
+			if err := retroRegisterDefault(mf, cfg, projectRoot); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: retroactive default profile registration: %s\n", err)
+			}
 		}
 	}
+	if err := migrateLegacyEntries(mf, projectRoot); err != nil {
+		return fmt.Errorf("migrate legacy manifest: %w", err)
+	}
 
-	// Snapshot manifest entries before provider loop (explicit copy to prevent aliasing)
-	existingEntries, _ := mf.GetProfile(profileName)
-	snapshot := append([]string(nil), existingEntries...)
+	existingItems, _ := mf.GetProfileItems(profileName)
+	nextItems := make(map[string]manifest.Item, len(existingItems))
+	for _, item := range existingItems {
+		nextItems[item.Path] = item
+	}
 
-	// Phase 2: sync per provider
-	totalSources := len(cfg.Skills)
 	var totalSynced int
 	var allErrors []string
-	var allSyncedEntries []string
-	anyProviderSucceeded := false
-
+	var allChanges []loresync.Change
 	for _, provName := range cfg.Providers {
 		prov, err := provider.Get(provName)
 		if err != nil {
 			return fmt.Errorf("get provider %q: %w", provName, err)
 		}
-
 		syncer := &loresync.Syncer{
-			GitFetcher:       fetcher,
-			Provider:         prov,
-			ProjectRoot:      projectRoot,
-			ProfileName:      profileName,
-			ManifestSnapshot: snapshot,
+			GitFetcher:    fetcher,
+			Provider:      prov,
+			ProjectRoot:   projectRoot,
+			ProfileName:   profileName,
+			Manifest:      mf,
+			Transactional: true,
 		}
-
-		result, err := syncer.Sync(cfg, baseDirs)
-		if err != nil {
-			if result != nil {
-				allErrors = append(allErrors, result.Errors...)
-				totalSynced += result.Synced
-				// Always collect entries even on error (partial success)
-				allSyncedEntries = append(allSyncedEntries, result.Entries...)
-				if len(result.Entries) > 0 {
-					anyProviderSucceeded = true
-				}
-			} else {
-				// Fatal error with no result — collect error and continue
-				// to allow other providers to sync and manifest to be saved
-				allErrors = append(allErrors, fmt.Sprintf("error: provider %q: %s", provName, err))
-			}
+		result, syncErr := syncer.Sync(cfg, baseDirs)
+		if result == nil {
+			allErrors = append(allErrors, fmt.Sprintf("error: provider %q: %s", provName, syncErr))
 			continue
 		}
-
 		totalSynced += result.Synced
 		allErrors = append(allErrors, result.Errors...)
-		allSyncedEntries = append(allSyncedEntries, result.Entries...)
-		anyProviderSucceeded = true
-	}
-
-	// Provider removal cleanup and manifest update (only when at least one provider succeeded)
-	if anyProviderSucceeded {
-		removedEntries, cleanupErrs := cleanRemovedProviders(snapshot, cfg.Providers, projectRoot, gitignorePath)
-		for _, e := range cleanupErrs {
-			fmt.Fprintln(os.Stderr, e)
+		allChanges = append(allChanges, result.Changes...)
+		for _, path := range result.Removed {
+			delete(nextItems, path)
 		}
-		_ = removedEntries
-
-		mf.SetProfile(profileName, allSyncedEntries)
+		for _, item := range result.Items {
+			nextItems[item.Path] = item
+		}
 	}
 
-	// Always save manifest
+	cleanupErrors, cleanupChanges := reconcileRemovedProviderItems(nextItems, cfg.Providers, projectRoot, mf, profileName, true)
+	allChanges = append(allChanges, cleanupChanges...)
+	for _, cleanupErr := range cleanupErrors {
+		fmt.Fprintln(os.Stderr, cleanupErr)
+	}
+
+	items := make([]manifest.Item, 0, len(nextItems))
+	for _, item := range nextItems {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Path < items[j].Path })
+	mf.SetProfileItems(profileName, items)
+
 	if err := manifest.Save(manifestPath, mf); err != nil {
+		rollbackErrors := loresync.RollbackChanges(allChanges)
+		if len(rollbackErrors) > 0 {
+			return fmt.Errorf("save manifest: %w; rollback errors: %v", err, rollbackErrors)
+		}
 		return fmt.Errorf("save manifest: %w", err)
 	}
-	// Ensure manifest in gitignore (idempotent)
-	if err := gitignore.EnsureEntries(gitignorePath, []string{".lore-manifest.yml"}); err != nil {
+	for _, commitErr := range loresync.CommitChanges(allChanges) {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", commitErr)
+	}
+	if err := reconcileGitignore(mf, gitignorePath); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not update .gitignore: %s\n", err)
 	}
 
-	// Print errors and summary
-	for _, e := range allErrors {
-		fmt.Fprintln(os.Stderr, e)
+	for _, syncErr := range allErrors {
+		fmt.Fprintln(os.Stderr, syncErr)
 	}
-
+	totalSources := countDistinctSources(allSources)
 	if len(allErrors) > 0 {
-		return fmt.Errorf("synced %d skills from %d sources with errors", totalSynced, totalSources)
+		return fmt.Errorf("synced %d items from %d sources with errors", totalSynced, totalSources)
 	}
-
-	fmt.Printf("Synced %d skills from %d sources\n", totalSynced, totalSources)
+	fmt.Printf("Synced %d items from %d sources\n", totalSynced, totalSources)
 	return nil
+}
+
+func countDistinctSources(sources []config.SkillSource) int {
+	seen := make(map[string]bool)
+	for _, source := range sources {
+		seen[source.Source] = true
+	}
+	return len(seen)
+}
+
+func migrateLegacyEntries(mf *manifest.Manifest, projectRoot string) error {
+	for _, profile := range mf.ProfileNames() {
+		items, _ := mf.GetProfileItems(profile)
+		for i, item := range items {
+			if !item.Legacy {
+				continue
+			}
+			prov, ok := providerForLegacySkill(projectRoot, item.Path)
+			if !ok {
+				return fmt.Errorf("cannot determine provider for %q", item.Path)
+			}
+			item.Provider = prov.Name()
+			item.Resource = "skills"
+			inspected, err := loresync.InspectLegacyItem(projectRoot, item)
+			if err != nil {
+				return fmt.Errorf("inspect %q: %w", item.Path, err)
+			}
+			items[i] = inspected
+		}
+		mf.SetProfileItems(profile, items)
+	}
+	return nil
+}
+
+func providerForLegacySkill(projectRoot string, entry string) (provider.Provider, bool) {
+	absolute := filepath.Clean(filepath.Join(projectRoot, entry))
+	for _, prov := range provider.All() {
+		root := prov.SkillRoot(projectRoot)
+		rel, err := filepath.Rel(root, absolute)
+		if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return prov, true
+		}
+	}
+	return nil, false
+}
+
+func reconcileRemovedProviderItems(items map[string]manifest.Item, configured config.ProviderList, projectRoot string, mf *manifest.Manifest, profileName string, transactional bool) ([]string, []loresync.Change) {
+	configuredSet := make(map[string]bool, len(configured))
+	for _, name := range configured {
+		configuredSet[name] = true
+	}
+	var warnings []string
+	var changes []loresync.Change
+	for path, item := range items {
+		providerName := item.Provider
+		var prov provider.Provider
+		if providerName != "" {
+			prov, _ = provider.Get(providerName)
+		} else if inferred, ok := providerForLegacySkill(projectRoot, path); ok {
+			prov = inferred
+			providerName = inferred.Name()
+		}
+		if configuredSet[providerName] {
+			continue
+		}
+		if prov == nil {
+			warnings = append(warnings, fmt.Sprintf("warning: preserving %q: cannot determine owning provider", path))
+			continue
+		}
+		shared := false
+		if mf != nil {
+			for _, owner := range mf.Owners(path) {
+				if owner != profileName {
+					shared = true
+					break
+				}
+			}
+		}
+		if shared {
+			delete(items, path)
+			continue
+		}
+		if transactional {
+			change, err := loresync.StageRemoveManagedItem(projectRoot, item)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("warning: preserving %q from removed provider %q: %s", path, providerName, err))
+				continue
+			}
+			if change != nil {
+				changes = append(changes, *change)
+			}
+		} else {
+			if err := loresync.RemoveManagedItem(projectRoot, item); err != nil {
+				warnings = append(warnings, fmt.Sprintf("warning: preserving %q from removed provider %q: %s", path, providerName, err))
+				continue
+			}
+			cleanEmptyParents(filepath.Dir(filepath.Join(projectRoot, path)), prov.ConfigRoot(projectRoot))
+		}
+		delete(items, path)
+	}
+	sort.Strings(warnings)
+	return warnings, changes
+}
+
+func reconcileGitignore(mf *manifest.Manifest, gitignorePath string) error {
+	entries := append(mf.AllPaths(), ".lore-manifest.yml")
+	return gitignore.SetManagedEntries(gitignorePath, entries)
 }
 
 // retroRegisterDefault scans each provider's skill directory for existing managed
@@ -211,13 +319,16 @@ func retroRegisterDefault(mf *manifest.Manifest, cfg *config.Config, projectRoot
 		return fmt.Errorf("resolve cache dir: %w", err)
 	}
 
-	var allEntries []string
+	var allItems []manifest.Item
 	for _, provName := range cfg.Providers {
 		prov, err := provider.Get(provName)
 		if err != nil {
 			return fmt.Errorf("get provider %q: %w", provName, err)
 		}
 		skillsParentDir := prov.SkillRoot(projectRoot)
+		if _, err := os.Stat(skillsParentDir); os.IsNotExist(err) {
+			continue
+		}
 		relDir, err := filepath.Rel(projectRoot, skillsParentDir)
 		if err != nil {
 			return fmt.Errorf("compute relative path for %q: %w", provName, err)
@@ -226,258 +337,92 @@ func retroRegisterDefault(mf *manifest.Manifest, cfg *config.Config, projectRoot
 		if err != nil {
 			return fmt.Errorf("scan entries for %q: %w", provName, err)
 		}
-		for _, e := range entries {
-			allEntries = append(allEntries, filepath.Join(relDir, e))
+		for _, entry := range entries {
+			item := manifest.Item{Path: filepath.ToSlash(filepath.Join(relDir, entry)), Provider: provName, Resource: "skills", Legacy: true}
+			item, err = loresync.InspectLegacyItem(projectRoot, item)
+			if err != nil {
+				continue
+			}
+			allItems = append(allItems, item)
 		}
 	}
 
-	if len(allEntries) > 0 {
-		mf.SetProfile("default", allEntries)
+	if len(allItems) > 0 {
+		mf.SetProfileItems("default", allItems)
 	}
 	return nil
 }
 
-// pruneOrphaned removes skills belonging to orphaned profiles (profiles whose
-// config files no longer exist).
+// pruneOrphaned removes items belonging to profiles whose config files no longer exist.
 func pruneOrphaned(mf *manifest.Manifest, projectRoot, manifestPath, gitignorePath string) error {
+	if err := migrateLegacyEntries(mf, projectRoot); err != nil {
+		return fmt.Errorf("migrate legacy manifest: %w", err)
+	}
 	orphans := mf.FindOrphaned(projectRoot, config.LocateProfile)
 	if len(orphans) == 0 {
-		fmt.Println("no orphaned profiles found — nothing to prune")
+		fmt.Println("no orphaned profiles found - nothing to prune")
 		return nil
 	}
 
 	var totalRemoved, totalSkipped int
-	var removedGitignoreEntries []string
-
+	var changes []loresync.Change
 	for _, name := range orphans {
-		entries, ok := mf.GetProfile(name)
+		items, ok := mf.GetProfileItems(name)
 		if !ok {
 			continue
 		}
-
-		for _, entry := range entries {
-			absPath := filepath.Clean(filepath.Join(projectRoot, entry))
-
-			// Validate path is within project root
-			if !strings.HasPrefix(absPath, projectRoot+string(os.PathSeparator)) {
-				fmt.Fprintf(os.Stderr, "warning: skipping %q: resolves outside project root\n", entry)
-				totalSkipped++
+		var retained []manifest.Item
+		for _, item := range items {
+			shared := false
+			for _, owner := range mf.Owners(item.Path) {
+				if owner != name {
+					shared = true
+					break
+				}
+			}
+			if shared {
+				totalRemoved++
 				continue
 			}
-
-			info, err := os.Lstat(absPath)
+			change, err := loresync.StageRemoveManagedItem(projectRoot, item)
 			if err != nil {
-				if os.IsNotExist(err) {
-					removedGitignoreEntries = append(removedGitignoreEntries, entry)
-					totalRemoved++
-					continue
-				}
-				fmt.Fprintf(os.Stderr, "warning: could not stat %q: %s\n", entry, err)
+				fmt.Fprintf(os.Stderr, "warning: preserving %q: %s\n", item.Path, err)
+				retained = append(retained, item)
 				totalSkipped++
 				continue
 			}
-
-			if info.Mode()&os.ModeSymlink != 0 {
-				// Symlink — safe to remove
-				if err := os.Remove(absPath); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: could not remove symlink %q: %s\n", entry, err)
-					totalSkipped++
-					continue
-				}
-				removedGitignoreEntries = append(removedGitignoreEntries, entry)
-				totalRemoved++
-			} else if info.IsDir() {
-				// Hard copy — check checksum
-				checksumFile := filepath.Join(absPath, ".lore-checksum")
-				storedChecksum, readErr := os.ReadFile(checksumFile)
-				if readErr != nil {
-					fmt.Fprintf(os.Stderr, "warning: skipping %q: not managed by loremaster (no .lore-checksum)\n", entry)
-					totalSkipped++
-					continue
-				}
-
-				currentChecksum, err := loresync.ComputeDirChecksum(absPath)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: skipping %q: could not verify checksum: %s\n", entry, err)
-					totalSkipped++
-					continue
-				}
-
-				if strings.TrimSpace(string(storedChecksum)) != currentChecksum {
-					fmt.Fprintf(os.Stderr, "warning: skipping %q: local modifications detected\n", entry)
-					totalSkipped++
-					continue
-				}
-
-				if err := os.RemoveAll(absPath); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: could not remove %q: %s\n", entry, err)
-					totalSkipped++
-					continue
-				}
-				removedGitignoreEntries = append(removedGitignoreEntries, entry)
-				totalRemoved++
-			} else {
-				fmt.Fprintf(os.Stderr, "warning: skipping %q: unexpected file type\n", entry)
-				totalSkipped++
+			if change != nil {
+				changes = append(changes, *change)
 			}
-
-			// Clean up empty parent directories
-			cleanEmptyParents(filepath.Dir(absPath), projectRoot)
+			totalRemoved++
 		}
-
-		mf.RemoveProfile(name)
-	}
-
-	// Update gitignore
-	if len(removedGitignoreEntries) > 0 {
-		if err := gitignore.RemoveEntries(gitignorePath, removedGitignoreEntries); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not update .gitignore: %s\n", err)
+		if len(retained) > 0 {
+			mf.SetProfileItems(name, retained)
+		} else {
+			mf.RemoveProfile(name)
 		}
 	}
 
-	// Save updated manifest
 	if err := manifest.Save(manifestPath, mf); err != nil {
+		rollbackErrors := loresync.RollbackChanges(changes)
+		if len(rollbackErrors) > 0 {
+			return fmt.Errorf("save manifest: %w; rollback errors: %v", err, rollbackErrors)
+		}
 		return fmt.Errorf("save manifest: %w", err)
 	}
+	for _, commitErr := range loresync.CommitChanges(changes) {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", commitErr)
+	}
+	if err := reconcileGitignore(mf, gitignorePath); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not update .gitignore: %s\n", err)
+	}
 
-	msg := fmt.Sprintf("Pruned %d skills from %d orphaned profiles", totalRemoved, len(orphans))
+	msg := fmt.Sprintf("Pruned %d items from %d orphaned profiles", totalRemoved, len(orphans))
 	if totalSkipped > 0 {
-		msg += fmt.Sprintf(" (%d skipped)", totalSkipped)
+		msg += fmt.Sprintf(" (%d preserved)", totalSkipped)
 	}
 	fmt.Println(msg)
 	return nil
-}
-
-// cleanRemovedProviders detects and cleans up skills from providers that were
-// removed from the config. It compares snapshot entries against configured
-// provider prefixes and removes any that no longer match.
-func cleanRemovedProviders(snapshot []string, configProviders config.ProviderList, projectRoot, gitignorePath string) (removed []string, errs []string) {
-	// Build configured prefix set
-	configuredPrefixes := make(map[string]bool)
-	for _, provName := range configProviders {
-		prov, err := provider.Get(provName)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("warning: could not resolve provider %q: %s", provName, err))
-			continue
-		}
-		prefix, err := skillRootPrefix(projectRoot, prov)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("warning: could not resolve provider %q skill root: %s", provName, err))
-			continue
-		}
-		configuredPrefixes[prefix+"/"] = true
-	}
-
-	if len(configuredPrefixes) == 0 {
-		return nil, errs
-	}
-
-	for _, entry := range snapshot {
-		// Check if entry has a prefix matching any configured provider
-		hasConfiguredProvider := false
-		entrySlash := filepath.ToSlash(entry)
-		for prefix := range configuredPrefixes {
-			if strings.HasPrefix(entrySlash, prefix) {
-				hasConfiguredProvider = true
-				break
-			}
-		}
-		if hasConfiguredProvider {
-			continue // Still configured — skip
-		}
-
-		// Stale: from a removed provider
-		absPath := filepath.Clean(filepath.Join(projectRoot, entry))
-
-		// Validate path is within project root
-		if !strings.HasPrefix(absPath, projectRoot+string(os.PathSeparator)) {
-			errs = append(errs, fmt.Sprintf("warning: skipping %q: resolves outside project root", entry))
-			continue
-		}
-
-		info, err := os.Lstat(absPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				// Already gone, still collect for gitignore cleanup
-				removed = append(removed, entry)
-				continue
-			}
-			errs = append(errs, fmt.Sprintf("warning: could not stat %q: %s", entry, err))
-			continue
-		}
-
-		if info.Mode()&os.ModeSymlink != 0 {
-			if err := os.Remove(absPath); err != nil {
-				errs = append(errs, fmt.Sprintf("warning: could not remove symlink %q: %s", entry, err))
-				continue
-			}
-			removed = append(removed, entry)
-		} else if info.IsDir() {
-			checksumFile := filepath.Join(absPath, ".lore-checksum")
-			storedChecksum, readErr := os.ReadFile(checksumFile)
-			if readErr != nil {
-				errs = append(errs, fmt.Sprintf("warning: skipping %q: not managed by loremaster (no .lore-checksum)", entry))
-				continue
-			}
-			currentChecksum, err := loresync.ComputeDirChecksum(absPath)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("warning: skipping %q: could not verify checksum: %s", entry, err))
-				continue
-			}
-			if strings.TrimSpace(string(storedChecksum)) != currentChecksum {
-				errs = append(errs, fmt.Sprintf("warning: skipping %q: local modifications detected", entry))
-				continue
-			}
-			if err := os.RemoveAll(absPath); err != nil {
-				errs = append(errs, fmt.Sprintf("warning: could not remove %q: %s", entry, err))
-				continue
-			}
-			removed = append(removed, entry)
-		} else {
-			errs = append(errs, fmt.Sprintf("warning: skipping %q: unexpected file type", entry))
-			continue
-		}
-
-		// Clean up empty parent directories, stopping at the actual skills root
-		// (e.g., .pi/agent/skills) to avoid removing provider directories.
-		cleanEmptyParents(filepath.Dir(absPath), skillRootForEntry(projectRoot, entry))
-	}
-
-	// Remove gitignore entries for cleaned-up skills
-	if len(removed) > 0 {
-		if err := gitignore.RemoveEntries(gitignorePath, removed); err != nil {
-			errs = append(errs, fmt.Sprintf("warning: could not update .gitignore: %s", err))
-		}
-	}
-
-	return removed, errs
-}
-
-func skillRootPrefix(projectRoot string, prov provider.Provider) (string, error) {
-	rel, err := filepath.Rel(projectRoot, prov.SkillRoot(projectRoot))
-	if err != nil {
-		return "", err
-	}
-	return filepath.ToSlash(rel), nil
-}
-
-func skillRootForEntry(projectRoot, entry string) string {
-	entrySlash := filepath.ToSlash(filepath.Clean(entry))
-	for _, prov := range provider.All() {
-		prefix, err := skillRootPrefix(projectRoot, prov)
-		if err != nil {
-			continue
-		}
-		if entrySlash == prefix || strings.HasPrefix(entrySlash, prefix+"/") {
-			return filepath.Join(projectRoot, filepath.FromSlash(prefix))
-		}
-	}
-
-	parts := strings.Split(entrySlash, "/")
-	if len(parts) >= 2 {
-		return filepath.Join(projectRoot, filepath.FromSlash(strings.Join(parts[:2], "/")))
-	}
-	return projectRoot
 }
 
 // cleanEmptyParents removes empty directories from dir up to (but not including) stopAt.

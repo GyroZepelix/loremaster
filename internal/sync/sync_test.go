@@ -229,10 +229,12 @@ func TestSync_HardCopy(t *testing.T) {
 		t.Error("hard copy should not be a symlink")
 	}
 
-	// Should have .lore-checksum
-	checksumPath := filepath.Join(skillPath, ".lore-checksum")
-	if _, err := os.Stat(checksumPath); err != nil {
-		t.Error("missing .lore-checksum file")
+	// Checksum metadata is returned for manifest storage, not written into the payload.
+	if len(result.Items) != 1 || result.Items[0].Checksum == "" {
+		t.Fatalf("hard-copy metadata = %#v", result.Items)
+	}
+	if _, err := os.Stat(filepath.Join(skillPath, ".lore-checksum")); !os.IsNotExist(err) {
+		t.Error("new hard copy should not contain a legacy .lore-checksum file")
 	}
 
 	// Content should be copied
@@ -267,18 +269,22 @@ func TestSync_HardCopy_LocalModifications(t *testing.T) {
 	baseDirs := buildBaseDirs(srcDir)
 
 	// First sync
-	if _, err := syncer.Sync(cfg, baseDirs); err != nil {
+	first, err := syncer.Sync(cfg, baseDirs)
+	if err != nil {
 		t.Fatalf("first Sync: %v", err)
 	}
+	mf := manifest.New()
+	mf.SetProfileItems("default", first.Items)
+	syncer.Manifest = mf
 
 	// Modify the copied skill
 	skillPath := filepath.Join(projectDir, ".claude", "skills", "my-skill")
 	os.WriteFile(filepath.Join(skillPath, "workflow.md"), []byte("# MODIFIED"), 0644)
 
-	// Second sync should skip due to checksum mismatch
+	// Second sync should fail safely due to checksum mismatch.
 	result, err := syncer.Sync(cfg, baseDirs)
-	if err != nil {
-		t.Fatalf("Sync: %v", err)
+	if err == nil {
+		t.Fatal("expected local-modification error")
 	}
 
 	// Verify modifications preserved
@@ -477,9 +483,13 @@ func TestSync_Idempotent(t *testing.T) {
 
 	baseDirs := buildBaseDirs(srcDir)
 
-	if _, err := syncer.Sync(cfg, baseDirs); err != nil {
+	first, err := syncer.Sync(cfg, baseDirs)
+	if err != nil {
 		t.Fatalf("first Sync: %v", err)
 	}
+	mf := manifest.New()
+	mf.SetProfileItems("default", first.Items)
+	syncer.Manifest = mf
 	gitignore1, _ := os.ReadFile(filepath.Join(projectDir, ".gitignore"))
 
 	if _, err := syncer.Sync(cfg, baseDirs); err != nil {
@@ -577,6 +587,9 @@ func TestSync_Integration_FullFlow(t *testing.T) {
 	}
 
 	// Remove one skill from config, re-sync
+	mf := manifest.New()
+	mf.SetProfileItems("default", result.Items)
+	syncer.Manifest = mf
 	includes2 := []string{"skill-alpha"}
 	cfg2 := &config.Config{
 		Providers: config.ProviderList{"claude"},
@@ -860,8 +873,8 @@ func TestSync_SubdirectoryInclude_CollisionDetection(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for cross-source overlap")
 	}
-	if !strings.Contains(err.Error(), "cross-source overlap") {
-		t.Errorf("expected cross-source overlap error, got: %v", err)
+	if !strings.Contains(err.Error(), "cross-resource overlap") {
+		t.Errorf("expected cross-resource overlap error, got: %v", err)
 	}
 }
 

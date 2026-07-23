@@ -26,9 +26,6 @@ func ParseIncludeEntry(raw string) (IncludeEntry, error) {
 		dst = raw
 	}
 
-	src = filepath.Clean(src)
-	dst = filepath.Clean(dst)
-
 	if err := validateIncludePath(src, "source"); err != nil {
 		return IncludeEntry{}, err
 	}
@@ -36,13 +33,23 @@ func ParseIncludeEntry(raw string) (IncludeEntry, error) {
 		return IncludeEntry{}, err
 	}
 
-	return IncludeEntry{Src: src, Dst: dst}, nil
+	return IncludeEntry{Src: filepath.Clean(src), Dst: filepath.Clean(dst)}, nil
+}
+
+func ValidateResourceName(raw string) (string, error) {
+	if err := validateIncludePath(raw, "resource"); err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(filepath.Clean(raw)), nil
+}
+
+func joinResourcePath(resource, destination string) string {
+	return filepath.ToSlash(filepath.Join(filepath.FromSlash(resource), destination))
 }
 
 // validateIncludePath validates a single path component (source or destination) of an include entry.
 func validateIncludePath(path, side string) error {
-	if path == "." {
-		// filepath.Clean("") returns ".", so this catches empty input
+	if path == "" || path == "." {
 		return fmt.Errorf("invalid include %s: must not be empty", side)
 	}
 
@@ -56,6 +63,9 @@ func validateIncludePath(path, side string) error {
 	// Reject backslashes before any other check (cross-platform safety)
 	if strings.Contains(path, `\`) {
 		return fmt.Errorf("invalid include path %q: backslashes are not allowed", path)
+	}
+	if strings.ContainsAny(path, "*?[]") {
+		return fmt.Errorf("invalid include path %q: glob metacharacters are not allowed", path)
 	}
 
 	cleaned := filepath.Clean(path)

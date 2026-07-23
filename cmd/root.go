@@ -6,12 +6,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.3.0"
+var version = "0.4.0"
 
 var rootCmd = &cobra.Command{
 	Use:   "lore",
-	Short: "Loremaster — declarative AI skill syncer",
-	Long:  "Loremaster syncs AI coding skills from git repos into your project's tool-specific skill directories.",
+	Short: "Loremaster - declarative AI resource syncer",
+	Long:  "Loremaster syncs skills, prompts, commands, and other resources into provider configuration directories.",
 }
 
 func init() {

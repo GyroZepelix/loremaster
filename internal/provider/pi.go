@@ -9,12 +9,20 @@ type Pi struct{}
 
 func (p *Pi) Name() string { return "pi" }
 
-func (p *Pi) SkillRoot(projectRoot string) string {
+func (p *Pi) ConfigRoot(projectRoot string) string {
 	home, err := os.UserHomeDir()
 	if err == nil && home != "" && samePath(projectRoot, home) {
-		return filepath.Join(projectRoot, ".pi", "agent", "skills")
+		return filepath.Join(projectRoot, ".pi", "agent")
 	}
-	return filepath.Join(projectRoot, ".pi", "skills")
+	return filepath.Join(projectRoot, ".pi")
+}
+
+func (p *Pi) ResourceDir(projectRoot string, resource string, item string) string {
+	return filepath.Join(p.ConfigRoot(projectRoot), resource, item)
+}
+
+func (p *Pi) SkillRoot(projectRoot string) string {
+	return filepath.Join(p.ConfigRoot(projectRoot), "skills")
 }
 
 func samePath(a, b string) bool {
@@ -27,7 +35,7 @@ func samePath(a, b string) bool {
 }
 
 func (p *Pi) SkillDir(projectRoot string, skillName string) string {
-	return filepath.Join(p.SkillRoot(projectRoot), skillName)
+	return p.ResourceDir(projectRoot, "skills", skillName)
 }
 
 func (p *Pi) ConfigDirs() []string {

@@ -2,69 +2,21 @@
 
 ![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPL--2.0-blue)
-![Version](https://img.shields.io/badge/version-0.3.0-green)
+![Version](https://img.shields.io/badge/version-0.4.0-green)
 
-Declarative skill syncer for AI coding tools. Define your skills in a config file, fetch them from git repos, and symlink them into your project — no manual copying, no git leakage. Supports profiles, multi-provider syncing, and subdirectory skill includes.
+Declarative resource sync for AI coding tools. Define skills, prompts, commands, or arbitrary provider-relative resource directories in `lore.yml`, then fetch and link them with one command.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Supported Tools](#supported-tools)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Commands](#commands)
-- [How It Works](#how-it-works)
-- [Shell Completions](#shell-completions)
-- [Development](#development)
-- [License](#license)
-
-## Overview
-
-`lore` keeps AI coding skills (prompts, commands, workflows) synchronized across projects. You declare what you need in a config file (`lore.yml` or a profile-specific `lore-<profile>.yml`), and loremaster handles cloning, caching, linking, and gitignore management.
-
-```mermaid
-flowchart LR
-    A[lore.yml] --> B[lore sync]
-    B --> C[Fetch repos to cache]
-    C --> D[Link skills per provider]
-    D --> E[Update .gitignore]
-```
-
-**Key properties:**
-
-- **Declarative** — one YAML config per project (or per profile)
-- **Multi-provider** — sync skills to Claude Code, OpenCode, Pi, Codex, or several at once
-- **Profile-aware** — maintain separate skill sets per profile (`lore-dev.yml`, `lore-review.yml`, etc.)
-- **Symlink-first** — upstream changes propagate automatically
-- **Cache-backed** — repos cloned once to `~/.local/share/loremaster/`
-- **Git-safe** — synced skills are auto-excluded from your project's `.gitignore`
-- **Partial failure isolation** — one bad source does not block the rest
-
-## Supported Tools
-
-| Provider    | Skill Directory      |
-|-------------|----------------------|
-| Claude Code | `.claude/skills/`   |
-| OpenCode    | `.opencode/skills/` |
-| Pi          | `.pi/skills/`       |
-| Codex       | `.agents/skills/`   |
-
-For global Pi sync from `~`, skills are written to `~/.pi/agent/skills/`.
+Loremaster supports Claude Code, OpenCode, Pi, and Codex. Sources may be Git repositories or local directories, and synchronized paths are automatically excluded from the project's Git index.
 
 ## Installation
 
-**Requirements:** Go 1.24+
-
-### go install (recommended)
+Requirements: Go 1.24+
 
 ```bash
 go install github.com/GyroZepelix/loremaster/cmd/lore@latest
 ```
 
-This installs the `lore` binary to your `$GOBIN` (defaults to `$GOPATH/bin` or `~/go/bin`). Make sure it's on your `$PATH`.
-
-### Build from source
+Or build from source:
 
 ```bash
 git clone https://github.com/GyroZepelix/loremaster.git
@@ -72,210 +24,255 @@ cd loremaster
 go build -o lore ./cmd/lore
 ```
 
-Move the binary somewhere on your `$PATH`:
-
-```bash
-mv lore ~/.local/bin/
-```
-
 ## Quick Start
 
 ```bash
-# 1. Navigate to a project that uses Claude Code, OpenCode, Pi, or Codex
 cd ~/my-project
-
-# 2. Initialize — auto-detects your AI tool and writes a skeleton lore.yml
 lore init
-
-# 3. Edit lore.yml to declare your skill sources
-cat lore.yml
-```
-
-```yaml
-provider: claude
-skills:
-  - source: git@github.com:you/your-skills.git
-    ref: main
-    include: [commit-message, code-review]
-    type: soft
-```
-
-```bash
-# 4. Sync — clones the repo, symlinks skills, updates .gitignore
+# Edit lore.yml, then:
 lore sync
-# Synced 2 skills from 1 sources
 ```
 
-### Profiles Example
-
-```bash
-# Create a profile for development-specific skills
-lore init -p dev
-# Edit lore-dev.yml to declare your dev skill sources
-
-# Sync the dev profile
-lore sync -p dev
-```
-
-### Multi-Provider Example
+A configuration can synchronize several resource types to several providers:
 
 ```yaml
-# lore.yml — sync skills to several AI tools
-provider: [claude, opencode, pi, codex]
+provider: [pi, claude]
+
 skills:
-  - source: git@github.com:you/your-skills.git
+  - source: ssh://git@github.com/example/agent-resources.git
     ref: main
-    include: [commit-message, code-review]
-    type: soft
+    include:
+      - example-skill
+      - nested/skill
+      - source-dir:renamed-skill
+
+prompts:
+  - source: ssh://git@github.com/example/agent-resources.git
+    ref: main
+    include:
+      - review.md
+
+hooks/tools:
+  - source: ssh://git@github.com/example/agent-resources.git
+    include:
+      - validate.sh:check.sh
 ```
+
+For a project sync, this produces paths such as:
+
+```text
+.pi/skills/example-skill
+.claude/skills/example-skill
+.pi/prompts/review.md
+.claude/prompts/review.md
+.pi/hooks/tools/check.sh
+.claude/hooks/tools/check.sh
+```
+
+When the sync root is `$HOME`, Pi uses `~/.pi/agent/` instead of `~/.pi/`.
 
 ## Configuration
 
-`lore.yml` can live in your project root or in a provider config directory (`.claude/`, `.opencode/`, `.pi/`, `.pi/agent/`, `.agents/`, `.codex/`). Loremaster searches these locations relative to the current directory via `Locate()`.
+Loremaster searches for `lore.yml` or `lore-<profile>.yml` in the current directory and these provider directories:
 
-### Scope
+```text
+.claude/
+.opencode/
+.pi/
+.pi/agent/
+.agents/
+.codex/
+```
 
-**Project scope** — Place `lore.yml` at the project root or inside a provider config directory. Run `lore sync` from the project directory.
-
-**Global scope** — Place `lore.yml` at `~/lore.yml` or a supported provider config directory under `~`, then run `lore sync` from `~`. There is no automatic `~/` fallback — global scope works because `Locate()` searches relative to the directory you invoke `lore sync` from. Pi global sync targets `~/.pi/agent/skills/`; Codex global sync targets `~/.agents/skills/`.
-
-Note: there is no config merging between project and global. Each `lore sync` invocation uses exactly one config file. If no config file is found in any of the search locations, `lore sync` exits with an error.
+Exactly one config is used. Project and global configs are not merged, and Loremaster does not search parent directories.
 
 ### Schema
 
+`provider` is the only reserved top-level key. Every other top-level key is a literal resource directory relative to each selected provider's configuration root.
+
+Each resource contains one or more source objects:
+
 ```yaml
-provider: claude                    # string or list: claude | opencode | pi | codex | [claude, opencode, pi, codex]
-skills:
-  - source: <git-url>              # required: any git-cloneable URL or local path
-    ref: main                       # optional: branch, tag, or commit SHA (default: HEAD)
-    include:                        # required: list of skill paths to sync
-      - skill-a                     # flat name (backward compat)
-      - loa/brainstorm              # subdirectory include
-      - deep/skill:my-tool          # src:dst mapping
-    type: soft                      # optional: soft (symlink) | hard (copy) — default: soft
+provider: claude
+
+commands:
+  - source: git@github.com:user/resources.git  # Git URL or local directory
+    ref: v1.2.0                                # Optional branch, tag, or commit
+    include:
+      - deploy.md                              # Exact source path
+      - source.md:renamed.md                   # Exact src:dst mapping
+      - templates                              # Exact directory, synchronized recursively
+    type: soft                                 # soft or hard, default: soft
 ```
+
+Allowed source fields are strictly validated:
+
+- `source`: required Git URL or local directory
+- `ref`: optional Git branch, tag, or commit
+- `include`: required list of exact relative paths
+- `type`: optional `soft` or `hard`
+
+A misspelled source field is an error. Because arbitrary top-level keys are intentional, a correctly shaped top-level typo such as `skils:` is treated as a literal resource named `skils`.
+
+### Skills Versus Other Resources
+
+The exact resource name `skills` retains its original contract: every include must resolve to a directory.
+
+All other resources may include regular files or directories. Included directories are synchronized recursively as one managed item. There is no extension filter or format validation.
+
+### Exact Paths Only
+
+Glob expansion is not supported. `*`, `?`, `[` and `]` are rejected in resource and include paths.
+
+```yaml
+# Invalid
+prompts:
+  - source: ./resources
+    include: ["*.md"]
+```
+
+List each file explicitly or include its containing directory.
+
+Resource names, include sources, and mapped destinations must be clean relative paths. Loremaster rejects:
+
+- Absolute paths
+- Paths that escape through `..`
+- Backslashes
+- Colons outside the `src:dst` separator
+- Control characters
+- Glob metacharacters
+- Exact or parent-child destination overlaps
+
+Collision checks use the complete `<resource>/<destination>` path. For example, `skills/foo` plus destination `bar` conflicts with destination `foo/bar` under `skills`.
+
+### Literal Provider Paths
+
+Loremaster transports files to literal paths. It does not translate resource names or validate whether a provider consumes them.
+
+| Provider | Project configuration root | Root when syncing from `$HOME` |
+|---|---|---|
+| Claude Code | `.claude/` | `~/.claude/` |
+| OpenCode | `.opencode/` | `~/.opencode/` |
+| Pi | `.pi/` | `~/.pi/agent/` |
+| Codex | `.agents/` | `~/.agents/` |
+
+The destination formula is:
+
+```text
+<provider-config-root>/<resource-name>/<mapped-include-destination>
+```
+
+Provider consumption rules still matter:
+
+- Pi loads project prompt templates from `.pi/prompts/*.md` and global templates from `~/.pi/agent/prompts/*.md`. Pi's default prompt discovery is non-recursive.
+- Claude Code uses `.claude/commands/*.md` for flat custom commands. A `prompts:` resource creates `.claude/prompts/...` literally, but Claude Code does not treat that directory as its command location.
+- Use `commands:` when the intended Claude destination is `.claude/commands/`.
+
+### Multi-Provider Sync
+
+A scalar or list is accepted:
+
+```yaml
+provider: claude
+```
+
+```yaml
+provider: [claude, opencode, pi, codex]
+```
+
+Each distinct source is fetched once and reused across resources and providers. A failure in one source or item does not stop unrelated items, but the command exits with an error after recording safe partial successes.
 
 ### Profiles
 
-Profiles let you maintain separate skill sets for different workflows (e.g., development vs. review).
+Profiles use `lore-<profile>.yml`:
 
-- **Config naming:** `lore-<profile>.yml` (e.g., `lore-dev.yml`, `lore-review.yml`)
-- **Default profile:** `-p default` maps to `lore.yml` — no `-p` flag also uses `lore.yml` (backward compat)
-- **Profile names:** lowercase alphanumeric + hyphens, max 64 characters
-- **Create a profile:** `lore init -p <profile>` creates a `lore-<profile>.yml` skeleton
-- **Sync a profile:** `lore sync -p <profile>`
-- **Multiple profiles coexist** — the manifest tracks per-profile skill ownership to prevent cross-profile clobbering
-- **Orphan cleanup:** if you delete a profile's config file, `lore sync --prune` removes that profile's skills from disk, `.gitignore`, and manifest
+```bash
+lore init -p dev
+lore sync -p dev
+```
 
-### Multi-Provider
+- No profile flag, or `-p default`, uses `lore.yml`.
+- Profiles own their synchronized destination paths.
+- A profile cannot overwrite a path owned by another profile.
+- `lore sync --prune` removes items belonging to profiles whose config files no longer exist.
+- Modified or unverifiable hard copies are preserved during sync, provider removal, resource removal, and prune.
 
-Sync skills to multiple AI tool directories in one pass.
+### Linking Modes and Ownership Safety
 
-- **Single provider:** `provider: claude` — backward compatible (v0.1.x format)
-- **Multiple providers:** `provider: [claude, opencode, pi, codex]` — skills are synced to each provider's skill directory
-- **Two-phase sync:** git repos are fetched once, then skills are linked per-provider
-- `.gitignore` entries are created for all provider paths
-- Duplicate providers and empty lists are rejected at parse time
+`soft` is the default. It creates a symlink to the selected source file or directory.
 
-### Subdirectory Includes
+`hard` copies the selected file or directory. Loremaster records a versioned checksum in `.lore-manifest.yml`; new hard copies do not add checksum files to provider resource directories. Directory checksums include file contents, permissions, empty directories, and symlink targets.
 
-Organize skills into nested directories using `/` path syntax.
+Loremaster refuses to overwrite an existing destination unless the active profile owns it. It also refuses to replace an owned destination when:
 
-- **Subdirectory:** `include: [loa/brainstorm]` — creates `<provider>/skills/loa/brainstorm/` symlink
-- **Mapped name:** `include: [deep/skill:my-tool]` — maps source `deep/skill/` to destination `my-tool/`
-- **Flat name:** `include: [brainstorm]` — still works (backward compat)
-- Path traversal (`..`) is rejected
-- Absolute paths are rejected
-- Overlapping prefixes are rejected (e.g., `loa` and `loa/brainstorm` cannot coexist)
+- A managed symlink was replaced with another filesystem type
+- A hard-copied file or directory has local modifications
+- Ownership or checksum metadata cannot be verified
 
-### Manifest
+Remove or relocate an unmanaged conflict explicitly, then run `lore sync` again.
 
-When profiles are used, loremaster creates a `.lore-manifest.yml` file in the project root to track per-profile skill ownership.
+### Manifest and Gitignore
 
-- Auto-created on first non-default profile sync (or when multi-provider is used with the default profile)
-- Auto-added to `.gitignore`
-- Single-provider + default profile (v0.1.x behavior): no manifest is created
-- If the manifest is corrupted, a warning is printed and sync proceeds as if no manifest exists
+Loremaster always writes `.lore-manifest.yml` in the sync root and adds it to `.gitignore`.
 
-### Linking Modes
+Manifest version 2 records each item's:
 
-- **soft** (default) — Creates symlinks pointing to the cached repo. Edits in the cache propagate to all projects using that skill.
-- **hard** — Copies the skill directory into your project. Loremaster tracks a `.lore-checksum` file and warns before overwriting local modifications.
+- Project-relative path
+- Provider
+- Resource name
+- Soft or hard mode
+- File or directory kind
+- Hard-copy checksum and checksum version
+- Soft-link target
+
+Version 1 manifests containing path strings are migrated automatically only when every existing item can be verified as a managed symlink or legacy checksum directory. Migration stops safely when legacy checksum limitations make local symlinks or empty directories unverifiable.
+
+If the manifest is missing or corrupt, existing destinations are treated as unmanaged and are not overwritten. Gitignore entries remain while any profile owns the corresponding path.
 
 ## Commands
 
 ```text
-lore init                        Bootstrap lore.yml with provider auto-detection
-lore init -p <profile>           Create lore-<profile>.yml for a named profile
-lore sync                        Fetch sources and link skills into your project
-lore sync -p <profile>           Sync a specific profile's config
-lore sync --prune                Remove orphaned profile skills from disk and gitignore
-lore completion <shell>          Generate shell completions (bash, zsh, fish)
-lore --version                   Print version
+lore init                        Create a lore.yml skeleton
+lore init -p <profile>           Create lore-<profile>.yml
+lore sync                        Fetch and synchronize resources
+lore sync -p <profile>           Synchronize a named profile
+lore sync --prune                Remove safely verified orphan-profile items
+lore completion <shell>          Generate bash, zsh, or fish completion
+lore --version                   Print the version
 lore help [command]              Show help
 ```
 
-> **Note:** Concurrent syncs targeting the same project directory are unsupported. Running multiple `lore sync` processes simultaneously may corrupt `.gitignore` or the manifest file.
+Concurrent syncs targeting the same project are unsupported and may corrupt `.gitignore` or `.lore-manifest.yml`.
 
 ## How It Works
 
-```mermaid
-flowchart LR
-    A[lore.yml] --> B[Parse config]
-    B --> C[Fetch repos to cache]
-    C --> D1[Link skills — provider 1]
-    C --> D2[Link skills — provider 2]
-    D1 --> E[Update .gitignore]
-    D2 --> E
-    E --> F[Reconcile manifest]
-```
+1. Parse and validate providers, dynamic resources, sources, includes, and destination collisions.
+2. Fetch each distinct Git or local source once.
+3. Resolve literal resource destinations for each provider.
+4. Verify manifest ownership before linking or copying each file or directory.
+5. Reconcile removed resources and providers without deleting modified or unmanaged content.
+6. Save the structured manifest and reconcile the managed `.gitignore` section.
 
-1. **Parse** — Reads the config file (`lore.yml` or `lore-<profile>.yml`) and validates it.
-2. **Fetch** — Clones new repos (or pulls existing ones) into `~/.local/share/loremaster/`. Checks out the specified ref. This happens once regardless of how many providers are configured.
-3. **Link** — For each provider, symlinks (or copies) each declared skill into the provider's skill directory (e.g., `.claude/skills/`, `.opencode/skills/`, `.pi/skills/`, `.agents/skills/`).
-4. **Clean** — Removes stale skills from previous syncs that are no longer declared. When profiles are active, stale reconciliation is scoped to the manifest — only skills owned by the current profile are candidates for removal.
-5. **Gitignore** — Adds managed entries to `.gitignore` under a `# Managed by loremaster` section. Idempotent and non-destructive.
+Filesystem replacements and removals retain same-directory backups until the manifest is saved. If manifest persistence fails, Loremaster rolls those changes back.
 
-If you set `$XDG_DATA_HOME`, loremaster uses it as the cache root. Otherwise, it defaults to `~/.local/share/loremaster/`.
+Git repositories are cached under `$XDG_DATA_HOME/loremaster/` when `XDG_DATA_HOME` is set, otherwise under `~/.local/share/loremaster/`.
 
 ## Shell Completions
 
 ```bash
-# Bash
 lore completion bash > ~/.bashrc.d/lore.bash
-source ~/.bashrc.d/lore.bash
-
-# Zsh
 lore completion zsh > "${fpath[1]}/_lore"
-
-# Fish
 lore completion fish > ~/.config/fish/completions/lore.fish
 ```
 
 ## Development
 
 ```bash
-# Run tests
-go test ./...
-
-# Build
-go build -o lore ./cmd/lore
-```
-
-### Project Structure
-
-```text
-cmd/
-  lore/             Main entry point (go install target)
-  *.go              CLI commands (init, sync, completion)
-internal/
-  config/           YAML parsing, validation, include parsing, and profile location
-  manifest/         Profile-scoped skill tracking (.lore-manifest.yml)
-  provider/         Tool-specific path resolution and detection
-  git/              Clone/pull/checkout via go-git
-  sync/             Core sync orchestration (two-phase fetch-then-link)
-  cache/            Repo cache management and URL normalization
-  gitignore/        Idempotent .gitignore management
+gofmt -w $(find cmd internal -type f -name '*.go')
+go test ./... -count=1
+go vet ./...
+go test -race ./...
+go build ./cmd/lore
 ```
 
 ## License
