@@ -23,6 +23,19 @@ type mockFetcher struct {
 	checkoutRef   string
 	shouldFail    bool
 	prepareSource func(dir string)
+	update        loregit.RepositoryUpdate
+}
+
+func (m *mockFetcher) Fetch(url string, targetDir string, ref string) (loregit.RepositoryUpdate, error) {
+	if err := m.CloneOrPull(url, targetDir); err != nil {
+		return m.update, err
+	}
+	if ref != "" {
+		if err := m.Checkout(targetDir, ref); err != nil {
+			return m.update, err
+		}
+	}
+	return m.update, nil
 }
 
 func (m *mockFetcher) CloneOrPull(url string, targetDir string) error {

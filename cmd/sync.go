@@ -3,6 +3,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,7 +37,7 @@ func init() {
 	rootCmd.AddCommand(syncCmd)
 }
 
-func runSync(cmd *cobra.Command, args []string) error {
+func runSync(cmd *cobra.Command, args []string) (returnErr error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
@@ -112,7 +114,17 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	allSources := cfg.AllSources()
 	fetcher := &git.ExecGitFetcher{}
-	baseDirs, fetchErrs := loresync.FetchSources(fetcher, allSources)
+	baseDirs, sourceUpdates, fetchErrs := loresync.FetchSourcesWithUpdates(fetcher, allSources)
+	out := io.Writer(os.Stdout)
+	if cmd != nil {
+		out = cmd.OutOrStdout()
+	}
+	rendered := false
+	defer func() {
+		if returnErr != nil && !rendered && hasRepositoryActivity(sourceUpdates) {
+			renderSyncSummary(out, sourceUpdates, nil)
+		}
+	}()
 	for _, fetchErr := range fetchErrs {
 		fmt.Fprintln(os.Stderr, fetchErr)
 	}
@@ -138,6 +150,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	var totalSynced int
 	var allErrors []string
 	var allChanges []loresync.Change
+	var allItemChanges []loresync.ItemChange
 	for _, provName := range cfg.Providers {
 		prov, err := provider.Get(provName)
 		if err != nil {
@@ -149,6 +162,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 			ProjectRoot:   projectRoot,
 			ProfileName:   profileName,
 			Manifest:      mf,
+			SourceUpdates: sourceUpdates,
 			Transactional: true,
 		}
 		result, syncErr := syncer.Sync(cfg, baseDirs)
@@ -159,6 +173,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		totalSynced += result.Synced
 		allErrors = append(allErrors, result.Errors...)
 		allChanges = append(allChanges, result.Changes...)
+		allItemChanges = append(allItemChanges, result.ItemChanges...)
 		for _, path := range result.Removed {
 			delete(nextItems, path)
 		}
@@ -169,6 +184,11 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	cleanupErrors, cleanupChanges := reconcileRemovedProviderItems(nextItems, cfg.Providers, projectRoot, mf, profileName, true)
 	allChanges = append(allChanges, cleanupChanges...)
+	for _, change := range cleanupChanges {
+		if path, relErr := filepath.Rel(projectRoot, change.Destination); relErr == nil {
+			allItemChanges = append(allItemChanges, loresync.ItemChange{Status: loresync.ItemDeleted, Path: filepath.ToSlash(filepath.Clean(path))})
+		}
+	}
 	for _, cleanupErr := range cleanupErrors {
 		fmt.Fprintln(os.Stderr, cleanupErr)
 	}
@@ -197,12 +217,86 @@ func runSync(cmd *cobra.Command, args []string) error {
 	for _, syncErr := range allErrors {
 		fmt.Fprintln(os.Stderr, syncErr)
 	}
+	renderSyncSummary(out, sourceUpdates, allItemChanges)
+	rendered = true
 	totalSources := countDistinctSources(allSources)
 	if len(allErrors) > 0 {
 		return fmt.Errorf("synced %d items from %d sources with errors", totalSynced, totalSources)
 	}
-	fmt.Printf("Synced %d items from %d sources\n", totalSynced, totalSources)
 	return nil
+}
+
+func hasRepositoryActivity(updates map[string]git.RepositoryUpdate) bool {
+	for _, update := range updates {
+		if update.Status == git.UpdateCloned || update.Status == git.UpdateFastForwarded {
+			return true
+		}
+	}
+	return false
+}
+
+func renderSyncSummary(w io.Writer, updates map[string]git.RepositoryUpdate, changes []loresync.ItemChange) {
+	repositories := make([]git.RepositoryUpdate, 0, len(updates))
+	for source, update := range updates {
+		if update.Status != git.UpdateCloned && update.Status != git.UpdateFastForwarded {
+			continue
+		}
+		if update.Source == "" {
+			update.Source = source
+		}
+		update.Source = sanitizedRepositorySource(update.Source)
+		repositories = append(repositories, update)
+	}
+	sort.Slice(repositories, func(i, j int) bool { return repositories[i].Source < repositories[j].Source })
+
+	seen := make(map[string]bool)
+	items := make([]loresync.ItemChange, 0, len(changes))
+	for _, change := range changes {
+		change.Path = filepath.ToSlash(filepath.Clean(filepath.FromSlash(change.Path)))
+		key := string(change.Status) + "\x00" + change.Path
+		if !seen[key] {
+			seen[key] = true
+			items = append(items, change)
+		}
+	}
+	rank := map[loresync.ItemChangeStatus]int{loresync.ItemAdded: 0, loresync.ItemUpdated: 1, loresync.ItemDeleted: 2}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Path != items[j].Path {
+			return items[i].Path < items[j].Path
+		}
+		return rank[items[i].Status] < rank[items[j].Status]
+	})
+
+	if len(repositories) == 0 && len(items) == 0 {
+		fmt.Fprintln(w, "No repository or synced item changes.")
+		return
+	}
+	if len(repositories) > 0 {
+		fmt.Fprintln(w, "Repositories:")
+		for _, update := range repositories {
+			switch update.Status {
+			case git.UpdateCloned:
+				fmt.Fprintf(w, "  cloned %s @ %s\n", update.Source, update.AfterCommit)
+			case git.UpdateFastForwarded:
+				fmt.Fprintf(w, "  fast-forwarded %s %s -> %s\n", update.Source, update.BeforeCommit, update.AfterCommit)
+			}
+		}
+	}
+	if len(items) > 0 {
+		fmt.Fprintln(w, "Synced items:")
+		for _, change := range items {
+			fmt.Fprintf(w, "  %s %s\n", change.Status, change.Path)
+		}
+	}
+}
+
+func sanitizedRepositorySource(source string) string {
+	parsed, err := url.Parse(source)
+	if err != nil || parsed.Host == "" || parsed.User == nil {
+		return source
+	}
+	parsed.User = nil
+	return parsed.String()
 }
 
 func countDistinctSources(sources []config.SkillSource) int {
