@@ -73,6 +73,15 @@ func buildBaseDirs(sources ...string) map[string]string {
 	return baseDirs
 }
 
+func resolvedSourcePath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve source path %q: %v", path, err)
+	}
+	return resolved
+}
+
 // parsedIncludes creates ParsedIncludes from Include strings for test configs.
 func parsedIncludes(includes []string) []config.IncludeEntry {
 	var entries []config.IncludeEntry
@@ -119,7 +128,7 @@ func TestSync_LocalSource_Symlink(t *testing.T) {
 			t.Errorf("skill %q not a symlink: %v", skill, err)
 			continue
 		}
-		expectedTarget := filepath.Join(srcDir, skill)
+		expectedTarget := resolvedSourcePath(t, filepath.Join(srcDir, skill))
 		if target != expectedTarget {
 			t.Errorf("symlink %q -> %q, want -> %q", skill, target, expectedTarget)
 		}
@@ -755,7 +764,7 @@ func TestSync_SubdirectoryInclude_NestedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("skill loa/brainstorm not a symlink: %v", err)
 	}
-	expectedTarget := filepath.Join(srcDir, "loa", "brainstorm")
+	expectedTarget := resolvedSourcePath(t, filepath.Join(srcDir, "loa", "brainstorm"))
 	if target != expectedTarget {
 		t.Errorf("symlink target = %q, want %q", target, expectedTarget)
 	}
@@ -808,7 +817,7 @@ func TestSync_SubdirectoryInclude_MappedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("skill my-tool not a symlink: %v", err)
 	}
-	expectedTarget := filepath.Join(srcDir, "deep", "skill")
+	expectedTarget := resolvedSourcePath(t, filepath.Join(srcDir, "deep", "skill"))
 	if target != expectedTarget {
 		t.Errorf("symlink target = %q, want %q", target, expectedTarget)
 	}
@@ -1187,7 +1196,7 @@ func TestSync_V01x_BackwardCompatibility(t *testing.T) {
 			t.Errorf("skill %q not a symlink: %v", skill, err)
 			continue
 		}
-		expectedTarget := filepath.Join(srcDir, skill)
+		expectedTarget := resolvedSourcePath(t, filepath.Join(srcDir, skill))
 		if target != expectedTarget {
 			t.Errorf("symlink %q -> %q, want -> %q", skill, target, expectedTarget)
 		}

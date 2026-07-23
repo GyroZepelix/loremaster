@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,8 @@ type Syncer struct {
 	ManifestSnapshot []string
 	Transactional    bool
 }
+
+var ErrLegacyItemAbsent = errors.New("legacy managed item is absent")
 
 type SyncResult struct {
 	Synced  int
@@ -106,6 +109,9 @@ func (s *Syncer) Sync(cfg *config.Config, baseDirs map[string]string) (*SyncResu
 		}
 	}
 
+	transitionConflicts, protectedStale := s.transitionConflicts(desired)
+	transitionRemoved := make(map[string]bool)
+
 	for _, resource := range resources {
 		for _, source := range resource.Sources {
 			baseDir, ok := baseDirs[source.Source]
@@ -116,12 +122,13 @@ func (s *Syncer) Sync(cfg *config.Config, baseDirs map[string]string) (*SyncResu
 				continue
 			}
 			for _, entry := range source.ParsedIncludes {
-				s.syncItem(resource.Name, source, entry, baseDir, result)
+				desiredPath := s.relativeDestination(resource.Name, entry.Dst)
+				s.syncItem(resource.Name, source, entry, baseDir, transitionConflicts[desiredPath], transitionRemoved, result)
 			}
 		}
 	}
 
-	s.reconcileStale(desired, result)
+	s.reconcileStale(desired, protectedStale, result)
 	sort.Strings(result.Entries)
 	sort.Slice(result.Items, func(i, j int) bool { return result.Items[i].Path < result.Items[j].Path })
 	sort.Strings(result.Removed)
@@ -168,11 +175,10 @@ func prepareResources(cfg *config.Config) ([]config.Resource, error) {
 	return prepared, nil
 }
 
-func (s *Syncer) syncItem(resource string, source config.SkillSource, entry config.IncludeEntry, baseDir string, result *SyncResult) {
-	srcPath := filepath.Join(baseDir, entry.Src)
-	info, err := os.Stat(srcPath)
+func (s *Syncer) syncItem(resource string, source config.SkillSource, entry config.IncludeEntry, baseDir string, conflicts []manifest.Item, transitionRemoved map[string]bool, result *SyncResult) {
+	srcPath, info, err := resolveSourceInclude(baseDir, entry.Src)
 	if err != nil {
-		s.recordItemError(resource, source, entry, result, fmt.Sprintf("source path %q was not found", srcPath))
+		s.recordItemError(resource, source, entry, result, err.Error())
 		return
 	}
 	if resource == "skills" && !info.IsDir() {
@@ -183,16 +189,33 @@ func (s *Syncer) syncItem(resource string, source config.SkillSource, entry conf
 		s.recordItemError(resource, source, entry, result, fmt.Sprintf("source path %q is not a regular file or directory", srcPath))
 		return
 	}
+	if source.Type != "soft" && source.Type != "hard" {
+		s.recordItemError(resource, source, entry, result, fmt.Sprintf("invalid link type %q", source.Type))
+		return
+	}
 
 	dstPath := s.Provider.ResourceDir(s.ProjectRoot, resource, entry.Dst)
 	relPath := s.relativeDestination(resource, entry.Dst)
-	if err := ensureNoSymlinkedParents(s.ProjectRoot, dstPath); err != nil {
-		s.recordItemError(resource, source, entry, result, err.Error())
-		return
-	}
 	managed, ownershipErr := s.managedState(relPath)
 	if ownershipErr != nil {
 		s.recordItemError(resource, source, entry, result, ownershipErr.Error())
+		return
+	}
+	conflictChanges, conflictPaths, err := s.stageTransitionConflicts(conflicts, transitionRemoved)
+	if err != nil {
+		s.recordItemError(resource, source, entry, result, err.Error())
+		return
+	}
+	rollbackConflicts := func(detail error) {
+		rollbackErrors := RollbackChanges(conflictChanges)
+		if len(rollbackErrors) > 0 {
+			s.recordItemError(resource, source, entry, result, fmt.Sprintf("%s; rollback errors: %v", detail, rollbackErrors))
+			return
+		}
+		s.recordItemError(resource, source, entry, result, detail.Error())
+	}
+	if err := ensureNoSymlinkedParents(s.ProjectRoot, dstPath); err != nil {
+		rollbackConflicts(err)
 		return
 	}
 	var linked LinkResult
@@ -202,7 +225,7 @@ func (s *Syncer) syncItem(resource string, source config.SkillSource, entry conf
 		linked, err = LinkItem(srcPath, dstPath, source.Type, managed)
 	}
 	if err != nil {
-		s.recordItemError(resource, source, entry, result, err.Error())
+		rollbackConflicts(err)
 		return
 	}
 
@@ -218,9 +241,130 @@ func (s *Syncer) syncItem(resource string, source config.SkillSource, entry conf
 	}
 	result.Entries = append(result.Entries, relPath)
 	result.Items = append(result.Items, item)
-	if linked.Change != nil {
-		result.Changes = append(result.Changes, *linked.Change)
+	for _, path := range conflictPaths {
+		if !transitionRemoved[path] {
+			transitionRemoved[path] = true
+			result.Removed = append(result.Removed, path)
+		}
 	}
+	if s.Transactional {
+		result.Changes = append(result.Changes, conflictChanges...)
+		if linked.Change != nil {
+			result.Changes = append(result.Changes, *linked.Change)
+		}
+	} else {
+		for _, commitErr := range CommitChanges(conflictChanges) {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", commitErr)
+		}
+	}
+}
+
+func (s *Syncer) transitionConflicts(desired map[string]bool) (map[string][]manifest.Item, map[string]bool) {
+	byDesired := make(map[string][]manifest.Item)
+	protected := make(map[string]bool)
+	configRoot := s.Provider.ConfigRoot(s.ProjectRoot)
+	for _, item := range s.previousItems() {
+		itemPath := normalizeManagedPath(item.Path)
+		if desired[itemPath] || !pathWithinRoot(s.ProjectRoot, configRoot, item.Path) {
+			continue
+		}
+		for desiredPath := range desired {
+			if strictPathAncestor(itemPath, desiredPath) || strictPathAncestor(desiredPath, itemPath) {
+				byDesired[desiredPath] = append(byDesired[desiredPath], item)
+				protected[itemPath] = true
+			}
+		}
+	}
+	for path := range byDesired {
+		sort.Slice(byDesired[path], func(i, j int) bool {
+			return normalizeManagedPath(byDesired[path][i].Path) < normalizeManagedPath(byDesired[path][j].Path)
+		})
+	}
+	return byDesired, protected
+}
+
+func (s *Syncer) stageTransitionConflicts(conflicts []manifest.Item, alreadyRemoved map[string]bool) ([]Change, []string, error) {
+	var pending []manifest.Item
+	for _, item := range conflicts {
+		if !alreadyRemoved[normalizeManagedPath(item.Path)] {
+			pending = append(pending, item)
+		}
+	}
+	if len(pending) == 0 {
+		return nil, nil, nil
+	}
+	for i, item := range pending {
+		path := normalizeManagedPath(item.Path)
+		if s.Manifest != nil {
+			owners := s.Manifest.Owners(item.Path)
+			profile := s.ProfileName
+			if profile == "" {
+				profile = "default"
+			}
+			if len(owners) != 1 || owners[0] != profile {
+				return nil, nil, fmt.Errorf("conflicting stale destination %q is owned by profile(s) %q", item.Path, strings.Join(owners, ", "))
+			}
+		}
+		for _, other := range pending[i+1:] {
+			otherPath := normalizeManagedPath(other.Path)
+			if strictPathAncestor(path, otherPath) || strictPathAncestor(otherPath, path) {
+				return nil, nil, fmt.Errorf("conflicting stale destinations %q and %q overlap", item.Path, other.Path)
+			}
+		}
+	}
+
+	var changes []Change
+	var paths []string
+	for _, item := range pending {
+		change, err := StageRemoveManagedItem(s.ProjectRoot, item)
+		if err != nil {
+			rollbackErrors := RollbackChanges(changes)
+			if len(rollbackErrors) > 0 {
+				return nil, nil, fmt.Errorf("preserve conflicting stale destination %q: %w; rollback errors: %v", item.Path, err, rollbackErrors)
+			}
+			return nil, nil, fmt.Errorf("preserve conflicting stale destination %q: %w", item.Path, err)
+		}
+		if change != nil {
+			cleanEmptyParents(filepath.Dir(change.Destination), s.Provider.ConfigRoot(s.ProjectRoot))
+			change.CleanupStop = ""
+			changes = append(changes, *change)
+		}
+		paths = append(paths, normalizeManagedPath(item.Path))
+	}
+	return changes, paths, nil
+}
+
+func strictPathAncestor(ancestor string, descendant string) bool {
+	rel, err := filepath.Rel(filepath.FromSlash(ancestor), filepath.FromSlash(descendant))
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func normalizeManagedPath(path string) string {
+	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+}
+
+func resolveSourceInclude(baseDir string, include string) (string, os.FileInfo, error) {
+	absoluteRoot, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve source root %q: %w", baseDir, err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve source root %q: %w", baseDir, err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(filepath.Join(resolvedRoot, filepath.FromSlash(include)))
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve source path %q: %w", filepath.Join(baseDir, filepath.FromSlash(include)), err)
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", nil, fmt.Errorf("source path %q resolves outside source root %q", filepath.Join(baseDir, filepath.FromSlash(include)), baseDir)
+	}
+	info, err := os.Stat(resolvedPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("stat resolved source path %q: %w", resolvedPath, err)
+	}
+	return resolvedPath, info, nil
 }
 
 func (s *Syncer) recordItemError(resource string, source config.SkillSource, entry config.IncludeEntry, result *SyncResult, detail string) {
@@ -274,14 +418,15 @@ func (s *Syncer) previousItems() []manifest.Item {
 	return items
 }
 
-func (s *Syncer) reconcileStale(desired map[string]bool, result *SyncResult) {
+func (s *Syncer) reconcileStale(desired map[string]bool, protected map[string]bool, result *SyncResult) {
 	configRoot := s.Provider.ConfigRoot(s.ProjectRoot)
 	profile := s.ProfileName
 	if profile == "" {
 		profile = "default"
 	}
 	for _, item := range s.previousItems() {
-		if desired[filepath.ToSlash(filepath.Clean(filepath.FromSlash(item.Path)))] || !pathWithinRoot(s.ProjectRoot, configRoot, item.Path) {
+		normalizedPath := normalizeManagedPath(item.Path)
+		if desired[normalizedPath] || protected[normalizedPath] || !pathWithinRoot(s.ProjectRoot, configRoot, item.Path) {
 			continue
 		}
 		shared := false
@@ -367,7 +512,7 @@ func removeManagedItem(projectRoot string, item manifest.Item, transactional boo
 	if !transactional {
 		return nil, os.RemoveAll(path)
 	}
-	backup, err := reserveSiblingPath(filepath.Dir(path), ".lore-remove-")
+	backup, err := reserveSiblingPath(prov.ConfigRoot(projectRoot), ".lore-remove-")
 	if err != nil {
 		return nil, err
 	}
@@ -407,9 +552,15 @@ func ensureNoSymlinkedParents(projectRoot string, destination string) error {
 }
 
 func InspectLegacyItem(projectRoot string, item manifest.Item) (manifest.Item, error) {
-	path := filepath.Join(projectRoot, item.Path)
+	path := filepath.Join(projectRoot, filepath.FromSlash(item.Path))
+	if err := ensureNoSymlinkedParents(projectRoot, path); err != nil {
+		return item, err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return item, fmt.Errorf("%w: %q", ErrLegacyItemAbsent, item.Path)
+		}
 		return item, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -215,8 +216,10 @@ func countDistinctSources(sources []config.SkillSource) int {
 func migrateLegacyEntries(mf *manifest.Manifest, projectRoot string) error {
 	for _, profile := range mf.ProfileNames() {
 		items, _ := mf.GetProfileItems(profile)
-		for i, item := range items {
+		migrated := make([]manifest.Item, 0, len(items))
+		for _, item := range items {
 			if !item.Legacy {
+				migrated = append(migrated, item)
 				continue
 			}
 			prov, ok := providerForLegacySkill(projectRoot, item.Path)
@@ -226,12 +229,15 @@ func migrateLegacyEntries(mf *manifest.Manifest, projectRoot string) error {
 			item.Provider = prov.Name()
 			item.Resource = "skills"
 			inspected, err := loresync.InspectLegacyItem(projectRoot, item)
+			if errors.Is(err, loresync.ErrLegacyItemAbsent) {
+				continue
+			}
 			if err != nil {
 				return fmt.Errorf("inspect %q: %w", item.Path, err)
 			}
-			items[i] = inspected
+			migrated = append(migrated, inspected)
 		}
-		mf.SetProfileItems(profile, items)
+		mf.SetProfileItems(profile, migrated)
 	}
 	return nil
 }

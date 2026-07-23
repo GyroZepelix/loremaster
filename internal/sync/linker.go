@@ -182,6 +182,10 @@ func RollbackChanges(changes []Change) []error {
 			errs = append(errs, fmt.Errorf("remove replacement %q: %w", change.Destination, err))
 			continue
 		}
+		if err := os.MkdirAll(filepath.Dir(change.Destination), 0755); err != nil {
+			errs = append(errs, fmt.Errorf("recreate parent for %q: %w", change.Destination, err))
+			continue
+		}
 		if err := os.Rename(change.Backup, change.Destination); err != nil {
 			errs = append(errs, fmt.Errorf("restore backup %q: %w", change.Destination, err))
 		}

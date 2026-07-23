@@ -83,6 +83,118 @@ func TestSyncRejectsSymlinkedDestinationParent(t *testing.T) {
 	}
 }
 
+func TestSyncRejectsSourceSymlinkEscapesAndContinues(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		include string
+		setup   func(t *testing.T, source string) string
+	}{
+		{
+			name:    "hard final file symlink",
+			mode:    "hard",
+			include: "escape.md",
+			setup: func(t *testing.T, source string) string {
+				outside := filepath.Join(t.TempDir(), "outside.md")
+				os.WriteFile(outside, []byte("outside"), 0644)
+				os.Symlink(outside, filepath.Join(source, "escape.md"))
+				return outside
+			},
+		},
+		{
+			name:    "soft final file symlink",
+			mode:    "soft",
+			include: "escape.md",
+			setup: func(t *testing.T, source string) string {
+				outside := filepath.Join(t.TempDir(), "outside.md")
+				os.WriteFile(outside, []byte("outside"), 0644)
+				os.Symlink(outside, filepath.Join(source, "escape.md"))
+				return outside
+			},
+		},
+		{
+			name:    "soft final directory symlink",
+			mode:    "soft",
+			include: "escape-dir",
+			setup: func(t *testing.T, source string) string {
+				outside := t.TempDir()
+				os.WriteFile(filepath.Join(outside, "outside.md"), []byte("outside"), 0644)
+				os.Symlink(outside, filepath.Join(source, "escape-dir"))
+				return outside
+			},
+		},
+		{
+			name:    "hard intermediate directory symlink",
+			mode:    "hard",
+			include: "escape-dir/nested.md",
+			setup: func(t *testing.T, source string) string {
+				outside := t.TempDir()
+				os.WriteFile(filepath.Join(outside, "nested.md"), []byte("outside"), 0644)
+				os.Symlink(outside, filepath.Join(source, "escape-dir"))
+				return filepath.Join(outside, "nested.md")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := t.TempDir()
+			source := t.TempDir()
+			t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+			os.WriteFile(filepath.Join(source, "valid.md"), []byte("valid"), 0644)
+			outside := tt.setup(t, source)
+			cfg := &config.Config{
+				Providers: config.ProviderList{"claude"},
+				Resources: []config.Resource{{Name: "prompts", Sources: []config.SkillSource{{
+					Source: source,
+					Type:   tt.mode,
+					ParsedIncludes: []config.IncludeEntry{
+						{Src: tt.include, Dst: tt.include},
+						{Src: "valid.md", Dst: "valid.md"},
+					},
+				}}}},
+			}
+			prov, _ := provider.Get("claude")
+			result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(cfg, map[string]string{source: source})
+			if err == nil || result.Synced != 1 || !strings.Contains(strings.Join(result.Errors, "\n"), "resolves outside source root") {
+				t.Fatalf("result = %#v, error = %v", result, err)
+			}
+			if _, err := os.Lstat(filepath.Join(project, ".claude", "prompts", filepath.FromSlash(tt.include))); !os.IsNotExist(err) {
+				t.Fatalf("escaping destination exists: %v", err)
+			}
+			valid := filepath.Join(project, ".claude", "prompts", "valid.md")
+			content, readErr := os.ReadFile(valid)
+			if readErr != nil || string(content) != "valid" {
+				t.Fatalf("valid include was not synced: content=%q err=%v", content, readErr)
+			}
+			if content, readErr := os.ReadFile(outside); readErr == nil && string(content) != "outside" {
+				t.Fatalf("external content changed: %q", content)
+			}
+		})
+	}
+}
+
+func TestSyncAllowsContainedSourceSymlink(t *testing.T) {
+	project := t.TempDir()
+	source := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+	os.Mkdir(filepath.Join(source, "real"), 0755)
+	real := filepath.Join(source, "real", "review.md")
+	os.WriteFile(real, []byte("review"), 0644)
+	os.Symlink(real, filepath.Join(source, "review.md"))
+	cfg := &config.Config{Providers: config.ProviderList{"claude"}, Resources: []config.Resource{{Name: "prompts", Sources: []config.SkillSource{{Source: source, Type: "soft", ParsedIncludes: []config.IncludeEntry{{Src: "review.md", Dst: "review.md"}}}}}}}
+	prov, _ := provider.Get("claude")
+	result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(cfg, map[string]string{source: source})
+	if err != nil || result.Synced != 1 {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	target, err := os.Readlink(filepath.Join(project, ".claude", "prompts", "review.md"))
+	resolvedReal, resolveErr := filepath.EvalSymlinks(real)
+	if err != nil || resolveErr != nil || target != resolvedReal {
+		t.Fatalf("target = %q, error = %v, want %q (resolve error %v)", target, err, resolvedReal, resolveErr)
+	}
+}
+
 func TestRemoveManagedItemRejectsSymlinkedDestinationParent(t *testing.T) {
 	project := t.TempDir()
 	outside := t.TempDir()
@@ -164,6 +276,292 @@ func TestStaleSharedOwnershipReleasesWithoutDeleting(t *testing.T) {
 	}
 	if _, err := os.Lstat(target); err != nil {
 		t.Fatalf("shared target was deleted: %v", err)
+	}
+}
+
+func TestMappingTransitionsSucceedInOneSync(t *testing.T) {
+	tests := []struct {
+		name           string
+		mode           string
+		oldIsDirectory bool
+		oldDestination string
+		newIsDirectory bool
+		newDestination string
+		resultFile     string
+	}{
+		{name: "soft ancestor to child", mode: "soft", oldIsDirectory: true, oldDestination: "templates", newDestination: "templates/a.md", resultFile: "templates/a.md"},
+		{name: "soft child to ancestor", mode: "soft", oldDestination: "templates/a.md", newIsDirectory: true, newDestination: "templates", resultFile: "templates/content.md"},
+		{name: "hard ancestor to child", mode: "hard", oldIsDirectory: true, oldDestination: "templates", newDestination: "templates/a.md", resultFile: "templates/a.md"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := t.TempDir()
+			t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+			prov, _ := provider.Get("claude")
+			oldSource, oldInclude := createTransitionSource(t, tt.oldIsDirectory, "old")
+			oldCfg := transitionConfig(oldSource, tt.mode, oldInclude, tt.oldDestination)
+			first, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(oldCfg, map[string]string{oldSource: oldSource})
+			if err != nil {
+				t.Fatalf("initial sync: %v", err)
+			}
+			mf := manifest.New()
+			mf.SetProfileItems("default", first.Items)
+
+			newSource, newInclude := createTransitionSource(t, tt.newIsDirectory, "new")
+			newCfg := transitionConfig(newSource, tt.mode, newInclude, tt.newDestination)
+			result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: mf, Transactional: true}).Sync(newCfg, map[string]string{newSource: newSource})
+			if err != nil {
+				t.Fatalf("transition sync: %v, result=%#v", err, result)
+			}
+			if len(result.Removed) != 1 || result.Removed[0] != ".claude/prompts/"+tt.oldDestination {
+				t.Fatalf("removed = %v", result.Removed)
+			}
+			if commitErrs := CommitChanges(result.Changes); len(commitErrs) != 0 {
+				t.Fatalf("commit changes: %v", commitErrs)
+			}
+			applySyncResultToManifest(mf, "default", result)
+			content, readErr := os.ReadFile(filepath.Join(project, ".claude", "prompts", filepath.FromSlash(tt.resultFile)))
+			if readErr != nil || string(content) != "new" {
+				t.Fatalf("new destination content = %q, err = %v", content, readErr)
+			}
+			assertNoLoreTemporaryPaths(t, project)
+
+			second, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: mf, Transactional: true}).Sync(newCfg, map[string]string{newSource: newSource})
+			if err != nil {
+				t.Fatalf("idempotent sync: %v, result=%#v", err, second)
+			}
+			if len(second.Removed) != 0 {
+				t.Fatalf("idempotent sync removed = %v", second.Removed)
+			}
+			if commitErrs := CommitChanges(second.Changes); len(commitErrs) != 0 {
+				t.Fatalf("commit idempotent changes: %v", commitErrs)
+			}
+			assertNoLoreTemporaryPaths(t, project)
+		})
+	}
+}
+
+func TestMappingTransitionToEmptyAncestorPersistsAfterCommit(t *testing.T) {
+	for _, mode := range []string{"soft", "hard"} {
+		t.Run(mode, func(t *testing.T) {
+			project := t.TempDir()
+			t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+			prov, _ := provider.Get("claude")
+			oldSource, oldInclude := createTransitionSource(t, false, "old")
+			first, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(transitionConfig(oldSource, mode, oldInclude, "templates/a.md"), map[string]string{oldSource: oldSource})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mf := manifest.New()
+			mf.SetProfileItems("default", first.Items)
+			newSource := t.TempDir()
+			os.Mkdir(filepath.Join(newSource, "empty"), 0755)
+			result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: mf, Transactional: true}).Sync(transitionConfig(newSource, mode, "empty", "templates"), map[string]string{newSource: newSource})
+			if err != nil {
+				t.Fatalf("transition sync: %v", err)
+			}
+			if commitErrs := CommitChanges(result.Changes); len(commitErrs) != 0 {
+				t.Fatalf("commit changes: %v", commitErrs)
+			}
+			destination := filepath.Join(project, ".claude", "prompts", "templates")
+			info, err := os.Lstat(destination)
+			if err != nil {
+				t.Fatalf("empty ancestor was removed after commit: %v", err)
+			}
+			if mode == "soft" && info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("soft destination mode = %v", info.Mode())
+			}
+			if mode == "hard" && !info.IsDir() {
+				t.Fatalf("hard destination mode = %v", info.Mode())
+			}
+			assertNoLoreTemporaryPaths(t, project)
+		})
+	}
+}
+
+func TestMappingTransitionMissingSourcePreservesStaleItem(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+	prov, _ := provider.Get("claude")
+	oldSource, oldInclude := createTransitionSource(t, true, "old")
+	oldCfg := transitionConfig(oldSource, "soft", oldInclude, "templates")
+	first, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(oldCfg, map[string]string{oldSource: oldSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mf := manifest.New()
+	mf.SetProfileItems("default", first.Items)
+	missingSource := t.TempDir()
+	newCfg := transitionConfig(missingSource, "soft", "missing.md", "templates/a.md")
+	result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: mf, Transactional: true}).Sync(newCfg, map[string]string{missingSource: missingSource})
+	if err == nil || len(result.Removed) != 0 || len(result.Changes) != 0 {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Lstat(filepath.Join(project, ".claude", "prompts", "templates")); err != nil {
+		t.Fatalf("stale ancestor was not preserved: %v", err)
+	}
+	assertNoLoreTemporaryPaths(t, project)
+}
+
+func TestMappingTransitionInstallFailureRollsBack(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+	prov, _ := provider.Get("claude")
+	oldSource, oldInclude := createTransitionSource(t, false, "old")
+	oldCfg := transitionConfig(oldSource, "soft", oldInclude, "templates/a.md")
+	first, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(oldCfg, map[string]string{oldSource: oldSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mf := manifest.New()
+	mf.SetProfileItems("default", first.Items)
+	unmanaged := filepath.Join(project, ".claude", "prompts", "templates", "keep.md")
+	os.WriteFile(unmanaged, []byte("keep"), 0644)
+	newSource, newInclude := createTransitionSource(t, true, "new")
+	newCfg := transitionConfig(newSource, "soft", newInclude, "templates")
+	result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: mf, Transactional: true}).Sync(newCfg, map[string]string{newSource: newSource})
+	if err == nil || len(result.Removed) != 0 || len(result.Changes) != 0 {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	oldPath := filepath.Join(project, ".claude", "prompts", "templates", "a.md")
+	if _, err := os.Readlink(oldPath); err != nil {
+		t.Fatalf("old mapping was not restored: %v", err)
+	}
+	if content, err := os.ReadFile(unmanaged); err != nil || string(content) != "keep" {
+		t.Fatalf("unmanaged sibling changed: content=%q err=%v", content, err)
+	}
+	assertNoLoreTemporaryPaths(t, project)
+}
+
+func TestMappingTransitionPreservesModifiedHardAndSharedItems(t *testing.T) {
+	t.Run("modified hard", func(t *testing.T) {
+		project := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+		prov, _ := provider.Get("claude")
+		oldSource, oldInclude := createTransitionSource(t, true, "old")
+		first, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(transitionConfig(oldSource, "hard", oldInclude, "templates"), map[string]string{oldSource: oldSource})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mf := manifest.New()
+		mf.SetProfileItems("default", first.Items)
+		oldContent := filepath.Join(project, ".claude", "prompts", "templates", "content.md")
+		os.WriteFile(oldContent, []byte("modified"), 0644)
+		newSource, newInclude := createTransitionSource(t, false, "new")
+		result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: mf, Transactional: true}).Sync(transitionConfig(newSource, "hard", newInclude, "templates/a.md"), map[string]string{newSource: newSource})
+		if err == nil || len(result.Removed) != 0 {
+			t.Fatalf("result = %#v, error = %v", result, err)
+		}
+		if content, _ := os.ReadFile(oldContent); string(content) != "modified" {
+			t.Fatalf("modified content changed: %q", content)
+		}
+		assertNoLoreTemporaryPaths(t, project)
+	})
+
+	t.Run("shared ownership", func(t *testing.T) {
+		project := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+		prov, _ := provider.Get("claude")
+		oldSource, oldInclude := createTransitionSource(t, true, "old")
+		first, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(transitionConfig(oldSource, "soft", oldInclude, "templates"), map[string]string{oldSource: oldSource})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mf := manifest.New()
+		mf.SetProfileItems("default", first.Items)
+		mf.SetProfileItems("staging", first.Items)
+		newSource, newInclude := createTransitionSource(t, false, "new")
+		result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: mf, Transactional: true}).Sync(transitionConfig(newSource, "soft", newInclude, "templates/a.md"), map[string]string{newSource: newSource})
+		if err == nil || len(result.Removed) != 0 || !strings.Contains(strings.Join(result.Errors, "\n"), "owned by profile") {
+			t.Fatalf("result = %#v, error = %v", result, err)
+		}
+		if _, err := os.Lstat(filepath.Join(project, ".claude", "prompts", "templates")); err != nil {
+			t.Fatalf("shared item was removed: %v", err)
+		}
+		assertNoLoreTemporaryPaths(t, project)
+	})
+}
+
+func TestMappingTransitionGlobalRollbackRestoresOriginal(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "cache"))
+	prov, _ := provider.Get("claude")
+	oldSource, oldInclude := createTransitionSource(t, false, "old")
+	first, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: manifest.New()}).Sync(transitionConfig(oldSource, "soft", oldInclude, "templates/a.md"), map[string]string{oldSource: oldSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mf := manifest.New()
+	mf.SetProfileItems("default", first.Items)
+	newSource, newInclude := createTransitionSource(t, true, "new")
+	result, err := (&Syncer{Provider: prov, ProjectRoot: project, ProfileName: "default", Manifest: mf, Transactional: true}).Sync(transitionConfig(newSource, "soft", newInclude, "templates"), map[string]string{newSource: newSource})
+	if err != nil {
+		t.Fatalf("transition sync: %v", err)
+	}
+	if rollbackErrs := RollbackChanges(result.Changes); len(rollbackErrs) != 0 {
+		t.Fatalf("rollback: %v", rollbackErrs)
+	}
+	oldPath := filepath.Join(project, ".claude", "prompts", "templates", "a.md")
+	if _, err := os.Readlink(oldPath); err != nil {
+		t.Fatalf("old mapping was not restored: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(project, ".claude", "prompts", "templates", "content.md")); !os.IsNotExist(err) {
+		t.Fatalf("new mapping remains after rollback: %v", err)
+	}
+	assertNoLoreTemporaryPaths(t, project)
+}
+
+func createTransitionSource(t *testing.T, directory bool, content string) (string, string) {
+	t.Helper()
+	source := t.TempDir()
+	if directory {
+		path := filepath.Join(source, "item")
+		os.Mkdir(path, 0755)
+		os.WriteFile(filepath.Join(path, "content.md"), []byte(content), 0644)
+		return source, "item"
+	}
+	os.WriteFile(filepath.Join(source, "item.md"), []byte(content), 0644)
+	return source, "item.md"
+}
+
+func transitionConfig(source string, mode string, include string, destination string) *config.Config {
+	return &config.Config{Providers: config.ProviderList{"claude"}, Resources: []config.Resource{{Name: "prompts", Sources: []config.SkillSource{{Source: source, Type: mode, ParsedIncludes: []config.IncludeEntry{{Src: include, Dst: destination}}}}}}}
+}
+
+func applySyncResultToManifest(mf *manifest.Manifest, profile string, result *SyncResult) {
+	items, _ := mf.GetProfileItems(profile)
+	byPath := make(map[string]manifest.Item, len(items)+len(result.Items))
+	for _, item := range items {
+		byPath[item.Path] = item
+	}
+	for _, path := range result.Removed {
+		delete(byPath, path)
+	}
+	for _, item := range result.Items {
+		byPath[item.Path] = item
+	}
+	items = items[:0]
+	for _, item := range byPath {
+		items = append(items, item)
+	}
+	mf.SetProfileItems(profile, items)
+}
+
+func assertNoLoreTemporaryPaths(t *testing.T, root string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".lore-remove-") || strings.HasPrefix(name, ".lore-stage-") || strings.HasPrefix(name, ".lore-backup-") {
+			t.Errorf("temporary path remains: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk temporary paths: %v", err)
 	}
 }
 
