@@ -2,7 +2,7 @@
 
 ![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPL--2.0-blue)
-![Version](https://img.shields.io/badge/version-0.4.0-green)
+![Version](https://img.shields.io/badge/version-0.4.1-green)
 
 Declarative resource sync for AI coding tools. Define skills, prompts, commands, or arbitrary provider-relative resource directories in `lore.yml`, then fetch and link them with one command.
 
