@@ -244,6 +244,28 @@ lore help [command]              Show help
 
 Concurrent syncs targeting the same project are unsupported and may corrupt `.gitignore` or `.lore-manifest.yml`.
 
+### Sync Output
+
+A sync reports repository activity and changed managed destinations:
+
+```text
+Repositories:
+  cloned git@github.com:example/resources.git @ 8f16d7b59e0bf1b27b09ad7e57f42ab95a16f0c8
+  fast-forwarded ssh://git@github.com/example/tools.git 0f5d9a6f7496b20ec4e03b50b702aa2a48e3a73f -> 38ea2230eeac8b700f14773079df9f653fdb5c77
+Synced items:
+  added .pi/skills/example-skill
+  updated .claude/commands/review.md
+  deleted .pi/prompts/old.md
+```
+
+Directory resources are reported as one managed destination item, not as every nested file. Repositories that did not change are omitted. If no repository or managed item changed, the command prints:
+
+```text
+No repository or synced item changes.
+```
+
+Warnings and item errors continue to use stderr. A partial sync reports confirmed successful changes before returning a nonzero exit status.
+
 ## How It Works
 
 1. Parse and validate providers, dynamic resources, sources, includes, and destination collisions.

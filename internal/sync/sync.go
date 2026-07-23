@@ -23,22 +23,43 @@ type Syncer struct {
 	ProfileName      string
 	Manifest         *manifest.Manifest
 	ManifestSnapshot []string
+	SourceUpdates    map[string]git.RepositoryUpdate
 	Transactional    bool
 }
 
 var ErrLegacyItemAbsent = errors.New("legacy managed item is absent")
 
+type ItemChangeStatus string
+
+const (
+	ItemAdded   ItemChangeStatus = "added"
+	ItemUpdated ItemChangeStatus = "updated"
+	ItemDeleted ItemChangeStatus = "deleted"
+)
+
+type ItemChange struct {
+	Status ItemChangeStatus
+	Path   string
+}
+
 type SyncResult struct {
-	Synced  int
-	Errors  []string
-	Entries []string
-	Items   []manifest.Item
-	Removed []string
-	Changes []Change
+	Synced      int
+	Errors      []string
+	Entries     []string
+	Items       []manifest.Item
+	Removed     []string
+	Changes     []Change
+	ItemChanges []ItemChange
 }
 
 func FetchSources(fetcher git.Fetcher, sources []config.SkillSource) (map[string]string, []string) {
+	baseDirs, _, errs := FetchSourcesWithUpdates(fetcher, sources)
+	return baseDirs, errs
+}
+
+func FetchSourcesWithUpdates(fetcher git.Fetcher, sources []config.SkillSource) (map[string]string, map[string]git.RepositoryUpdate, []string) {
 	baseDirs := make(map[string]string)
+	updates := make(map[string]git.RepositoryUpdate)
 	var errs []string
 	seen := make(map[string]bool)
 	for _, source := range sources {
@@ -52,15 +73,14 @@ func FetchSources(fetcher git.Fetcher, sources []config.SkillSource) (map[string
 				errs = append(errs, fmt.Sprintf("error: resolve cache for %q: %s", source.Source, err))
 				continue
 			}
-			if err := fetcher.CloneOrPull(source.Source, repoDir); err != nil {
-				errs = append(errs, fmt.Sprintf("error: fetch %q: %s (check URL and authentication)", source.Source, err))
-				continue
+			update, err := fetcher.Fetch(source.Source, repoDir, source.Ref)
+			update.Source = source.Source
+			if update.Status != "" {
+				updates[source.Source] = update
 			}
-			if source.Ref != "" {
-				if err := fetcher.Checkout(repoDir, source.Ref); err != nil {
-					errs = append(errs, fmt.Sprintf("error: checkout ref %q for %q: %s", source.Ref, source.Source, err))
-					continue
-				}
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("error: fetch %q: %s (check URL, ref, and authentication)", source.Source, err))
+				continue
 			}
 			baseDirs[source.Source] = repoDir
 			continue
@@ -78,7 +98,7 @@ func FetchSources(fetcher git.Fetcher, sources []config.SkillSource) (map[string
 		}
 		baseDirs[source.Source] = absSource
 	}
-	return baseDirs, errs
+	return baseDirs, updates, errs
 }
 
 func (s *Syncer) Sync(cfg *config.Config, baseDirs map[string]string) (*SyncResult, error) {
@@ -132,6 +152,7 @@ func (s *Syncer) Sync(cfg *config.Config, baseDirs map[string]string) (*SyncResu
 	sort.Strings(result.Entries)
 	sort.Slice(result.Items, func(i, j int) bool { return result.Items[i].Path < result.Items[j].Path })
 	sort.Strings(result.Removed)
+	result.ItemChanges = normalizeItemChanges(result.ItemChanges)
 	result.Synced = len(result.Items)
 
 	if s.Manifest == nil {
@@ -201,6 +222,8 @@ func (s *Syncer) syncItem(resource string, source config.SkillSource, entry conf
 		s.recordItemError(resource, source, entry, result, ownershipErr.Error())
 		return
 	}
+	_, destinationErr := os.Lstat(dstPath)
+	destinationExisted := destinationErr == nil
 	conflictChanges, conflictPaths, err := s.stageTransitionConflicts(conflicts, transitionRemoved)
 	if err != nil {
 		s.recordItemError(resource, source, entry, result, err.Error())
@@ -241,6 +264,16 @@ func (s *Syncer) syncItem(resource string, source config.SkillSource, entry conf
 	}
 	result.Entries = append(result.Entries, relPath)
 	result.Items = append(result.Items, item)
+	if managed == nil {
+		result.ItemChanges = append(result.ItemChanges, ItemChange{Status: ItemAdded, Path: relPath})
+	} else if !destinationExisted || managedItemChanged(managed, item) || sourceIncludeChanged(s.SourceUpdates[source.Source], entry.Src, info.IsDir()) {
+		result.ItemChanges = append(result.ItemChanges, ItemChange{Status: ItemUpdated, Path: relPath})
+	}
+	for _, change := range conflictChanges {
+		if path, relErr := filepath.Rel(s.ProjectRoot, change.Destination); relErr == nil {
+			result.ItemChanges = append(result.ItemChanges, ItemChange{Status: ItemDeleted, Path: filepath.ToSlash(filepath.Clean(path))})
+		}
+	}
 	for _, path := range conflictPaths {
 		if !transitionRemoved[path] {
 			transitionRemoved[path] = true
@@ -257,6 +290,46 @@ func (s *Syncer) syncItem(resource string, source config.SkillSource, entry conf
 			fmt.Fprintf(os.Stderr, "warning: %s\n", commitErr)
 		}
 	}
+}
+
+func managedItemChanged(previous *ManagedState, current manifest.Item) bool {
+	return previous.Mode != current.Mode ||
+		previous.Kind != current.Kind ||
+		previous.Checksum != current.Checksum ||
+		previous.ChecksumVersion != current.ChecksumVersion ||
+		previous.Target != current.Target
+}
+
+func sourceIncludeChanged(update git.RepositoryUpdate, include string, directory bool) bool {
+	include = filepath.ToSlash(filepath.Clean(filepath.FromSlash(include)))
+	for _, changed := range update.ChangedPaths {
+		changed = filepath.ToSlash(filepath.Clean(filepath.FromSlash(changed)))
+		if changed == include || directory && strings.HasPrefix(changed, include+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeItemChanges(changes []ItemChange) []ItemChange {
+	seen := make(map[string]bool)
+	result := make([]ItemChange, 0, len(changes))
+	for _, change := range changes {
+		change.Path = normalizeManagedPath(change.Path)
+		key := string(change.Status) + "\x00" + change.Path
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, change)
+		}
+	}
+	rank := map[ItemChangeStatus]int{ItemAdded: 0, ItemUpdated: 1, ItemDeleted: 2}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Status != result[j].Status {
+			return rank[result[i].Status] < rank[result[j].Status]
+		}
+		return result[i].Path < result[j].Path
+	})
+	return result
 }
 
 func (s *Syncer) transitionConflicts(desired map[string]bool) (map[string][]manifest.Item, map[string]bool) {
@@ -450,11 +523,16 @@ func (s *Syncer) reconcileStale(desired map[string]bool, protected map[string]bo
 			}
 			if change != nil {
 				result.Changes = append(result.Changes, *change)
+				result.ItemChanges = append(result.ItemChanges, ItemChange{Status: ItemDeleted, Path: item.Path})
 			}
 		} else {
-			if err := RemoveManagedItem(s.ProjectRoot, item); err != nil {
+			change, err := removeManagedItem(s.ProjectRoot, item, false)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: preserving %q: %s\n", item.Path, err)
 				continue
+			}
+			if change != nil {
+				result.ItemChanges = append(result.ItemChanges, ItemChange{Status: ItemDeleted, Path: item.Path})
 			}
 			cleanEmptyParents(filepath.Dir(filepath.Join(s.ProjectRoot, item.Path)), configRoot)
 		}
@@ -510,7 +588,10 @@ func removeManagedItem(projectRoot string, item manifest.Item, transactional boo
 		return nil, err
 	}
 	if !transactional {
-		return nil, os.RemoveAll(path)
+		if err := os.RemoveAll(path); err != nil {
+			return nil, err
+		}
+		return &Change{Destination: path}, nil
 	}
 	backup, err := reserveSiblingPath(prov.ConfigRoot(projectRoot), ".lore-remove-")
 	if err != nil {
