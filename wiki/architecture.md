@@ -20,6 +20,13 @@ External boundaries are:
 6. Filesystem replacements and removals remain staged until `manifest.Save` succeeds. A save failure triggers reverse-order rollback; success commits backup removal (`cmd/sync.go`, `internal/sync/linker.go`).
 7. Final manifest ownership drives the sorted managed `.gitignore` entries (`cmd/sync.go`, `internal/gitignore/gitignore.go`).
 
+## Sync change reporting
+
+- **Repository updates are first-class sync results** - Each distinct Git source can return clone or fast-forward status, commit identities, and effective changed paths alongside its resolved cache directory (`internal/git/`, `internal/sync/sync.go`). `Verified` ([session](./dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+- **Managed-item status is semantic** - Added, updated, and actually deleted destinations are tracked separately from transactional replacement records, so identical relinks and ownership-only releases do not become user-visible changes (`internal/sync/sync.go`). `Verified` ([session](./dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+- **Link mode determines update evidence** - Soft-linked items use changed Git paths within configured includes, while hard copies use resulting manifest metadata and checksums (`internal/sync/sync.go`). `Verified` ([session](./dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+- **Normal output is deterministic and activity-based** - `lore sync` sorts repository/item changes, omits unchanged repositories, and emits one no-change summary when neither repository nor managed-item activity occurred (`cmd/sync.go`). `Verified` ([session](./dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+
 ## Data ownership
 
 | Data | Owner and authority |

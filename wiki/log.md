@@ -26,3 +26,11 @@ Use this shape for new entries:
 - Wiki pages changed: `wiki/index.md`, `wiki/overview.md`, `wiki/map.md`, `wiki/architecture.md`, `wiki/configuration.md`, `wiki/development.md`, `wiki/conventions/index.md`, `wiki/conventions/go-code.md`, `wiki/conventions/testing.md`, `wiki/conventions/sync-safety.md`, `wiki/log.md`, and `wiki/state.md`.
 - Verification: all maintained pages are indexed; conventions are routed; links and cited paths resolve; Markdown, ASCII, fence, whitespace, scope, and secret-pattern checks passed; `gofmt -d $(git ls-files '*.go')` passed with no diff.
 - Notes: initial ingest complete. Tests, vet, race checks, builds, application commands, and Git/network flows were not run under the ingest safety constraints. Needs review: tracked specs are absent from `spec/index.md`, and no license file is tracked despite the GPL v2 claim in `README.md`.
+
+## [2026-07-23] dream | sync reporting and wiki integration
+
+- Trigger: `/dream` run after implementing, reviewing, committing, and merging sync change reporting and the repository wiki.
+- Inputs: current session; commits `95614b5`, `923f579`, and `c442d9c`; `spec/260723-1917-report-lore-sync-repository-and-item-changes.md`; `cmd/sync.go`; `internal/git/`; `internal/sync/`; focused tests and verification results.
+- Wiki pages changed: `wiki/dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md`, `wiki/dreams/MEMORY.md`, `wiki/index.md`, `wiki/architecture.md`, `wiki/conventions/sync-safety.md`, `wiki/conventions/testing.md`, `wiki/development.md`, `wiki/log.md`, and `wiki/state.md`.
+- Verification: re-read changed files, checked links and source evidence, ran memory safety scans, and confirmed the compact memory token budget.
+- Notes: no secrets or raw transcript were stored; no source, spec, dependency, Git configuration, commit, or push changes were made by this dream run. Open wiki issues remain for the unindexed completed spec and missing tracked license file.

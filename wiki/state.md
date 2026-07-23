@@ -1,7 +1,7 @@
 # Wiki State
 
 Last full ingest commit: 22c4d4e2f53292a8b640274380a82707cd86c3d7
-Last incremental ingest commit: none
+Last incremental ingest commit: c442d9c657ca67e9cef6f6ddddd45c6bb04bc214
 Last lint date: 2026-07-23
 
 ## Processed inputs
@@ -10,6 +10,7 @@ Last lint date: 2026-07-23
 | --- | --- | --- | --- | --- | --- |
 | `https://git.dgjalic.com/dgjalic/repo-wiki-template` | Template installer | Forgejo repository | 2026-07-23 | `AGENTS.md`, `spec/`, `wiki/` | Installed lean repo wiki template. |
 | `22c4d4e2f53292a8b640274380a82707cd86c3d7` | Full codebase ingest | Git tracked working tree | 2026-07-23 | `wiki/overview.md`, `wiki/map.md`, `wiki/architecture.md`, `wiki/configuration.md`, `wiki/development.md`, `wiki/conventions/`, `wiki/index.md` | Complete initial ingest from a clean baseline. |
+| `95614b5`, `923f579`, `c442d9c` | Incremental code and wiki ingest | Git commits and completed implementation session | 2026-07-23 | `wiki/architecture.md`, `wiki/conventions/sync-safety.md`, `wiki/conventions/testing.md`, `wiki/development.md`, `wiki/dreams/`, `wiki/index.md` | Sync reporting, review fixes, verification evidence, and wiki merge processed into durable memory. |
 
 ## Full ingest record
 

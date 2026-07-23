@@ -17,6 +17,11 @@ Durable current-state codebase knowledge. Read this file first when answering co
 - [Testing conventions](./conventions/testing.md): Standard-library test structure, isolation, and expected coverage.
 - [Sync safety conventions](./conventions/sync-safety.md): Ownership, containment, integrity checks, and rollback rules.
 
+## Dreams
+
+- [Memory pointers](./dreams/MEMORY.md): Conditional routes to high-value repository learnings.
+- [2026-07-23 sync reporting and wiki integration](./dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md): Implemented, reviewed, verified, and committed sync change reporting, then merged the repository wiki branch; local work is complete and unpushed.
+
 ## Maintenance
 
 - [Wiki instructions](./AGENTS.md): Scoped rules for durable memory maintenance.
@@ -32,4 +37,3 @@ Canonical ADRs belong in `../spec/decisions/` when needed. Current implementatio
 
 - Needs review: `../spec/index.md` does not currently route the existing tracked planning artifacts.
 - Needs review: `../README.md` identifies GPL v2, but no license file is tracked.
-- Unverified: Tests, vet, race checks, builds, and runtime commands were intentionally not executed during the initial ingest. See [Development](./development.md).

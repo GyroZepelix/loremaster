@@ -27,6 +27,11 @@ Filesystem replacement and removal use sibling staging and backup paths. `cmd/sy
 
 Reconcile `.gitignore` only from final manifest ownership. Keep `.lore-manifest.yml` ignored, sort entries, and preserve user-authored content outside the `# Managed by loremaster` section (`internal/gitignore/gitignore.go`).
 
+## Reporting and cache safety
+
+- **Strip URL user information only at the display boundary** - Repository success output removes parsed URL usernames and authentication material without changing the source string passed to clone or fetch (`cmd/sync.go`). `Verified` ([session](../dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+- **Never force checkout over a dirty cached worktree** - A same-branch no-op preserves local cache changes; revision movement returns a clear error before changing the local branch, and a later checkout failure restores the prior ref (`internal/git/git.go`). `Verified` ([session](../dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+
 ## Concurrency
 
 Concurrent syncs targeting the same project are unsupported because manifest and `.gitignore` updates are not locked (`README.md`). Do not imply concurrency safety without adding and verifying a repository-wide locking design.

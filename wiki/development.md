@@ -48,6 +48,11 @@ Result: passed with no diff. The command definition was inspected first; `-d` di
 
 Unverified during ingest: unit tests, race tests, vet, builds, application commands, and Git/network flows. They were skipped by explicit ingest safety constraints, not because of known failures.
 
+## Post-ingest verification
+
+- **Sync reporting changes passed the full local matrix** - Focused tests, `go test ./... -count=1`, `go vet ./...`, `go test -race ./...`, formatting/diff checks, a temporary-output build, and disposable Git acceptance passed before commits `95614b5` and `923f579`. `Verified` ([session](./dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+- **The wiki merge preserved the test baseline** - `go test ./...` passed after merge commit `c442d9c`; no remote CI, push, release, or production install was performed. `Verified` ([session](./dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+
 ## Release and version notes
 
 The CLI version is a source variable in `cmd/root.go`; the README also displays the current version. Keep both aligned. There is no tracked release automation or deployment configuration. `README.md` is the source for build and installation instructions.

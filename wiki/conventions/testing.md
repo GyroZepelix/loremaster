@@ -23,3 +23,9 @@
 - Manifest format changes require load, save, malformed input, prior-version migration, and deterministic round-trip coverage (`internal/manifest/v2_test.go`).
 
 The documented full verification command is `go test ./... -count=1`; race-sensitive changes should also use `go test -race ./...` (`README.md`).
+
+## Sync reporting and Git regressions
+
+- **Exercise both Git backends with the same local-repository scenarios** - Cover clone, no-op, fast-forward, rename paths, configured tags/branches, default-branch restoration, and local-ahead histories (`internal/git/update_test.go`). `Verified` ([session](../dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+- **Test dirty cache preservation as filesystem state** - Assert both the returned error policy and unchanged worktree content/HEAD when remote movement conflicts with local cache edits (`internal/git/update_test.go`). `Verified` ([session](../dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
+- **Separate output tests from semantic sync tests** - Keep exact CLI rendering/redaction cases in `cmd/`, and verify soft-path versus hard-checksum classification in `internal/sync/` (`cmd/sync_output_test.go`, `internal/sync/change_reporting_test.go`). `Verified` ([session](../dreams/2026-07-23-2017-sync-reporting-and-wiki-integration.md))
