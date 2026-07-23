@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -243,6 +244,7 @@ func renderSyncSummary(w io.Writer, updates map[string]git.RepositoryUpdate, cha
 		if update.Source == "" {
 			update.Source = source
 		}
+		update.Source = sanitizedRepositorySource(update.Source)
 		repositories = append(repositories, update)
 	}
 	sort.Slice(repositories, func(i, j int) bool { return repositories[i].Source < repositories[j].Source })
@@ -286,6 +288,15 @@ func renderSyncSummary(w io.Writer, updates map[string]git.RepositoryUpdate, cha
 			fmt.Fprintf(w, "  %s %s\n", change.Status, change.Path)
 		}
 	}
+}
+
+func sanitizedRepositorySource(source string) string {
+	parsed, err := url.Parse(source)
+	if err != nil || parsed.Host == "" || parsed.User == nil {
+		return source
+	}
+	parsed.User = nil
+	return parsed.String()
 }
 
 func countDistinctSources(sources []config.SkillSource) int {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -131,6 +132,67 @@ func TestFetchConfiguredRefs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGoGitFetchPreservesDirtyWorktree(t *testing.T) {
+	requireGit(t)
+	t.Run("unchanged remote", func(t *testing.T) {
+		repoPath := createTestRepoExec(t)
+		cloneDir := filepath.Join(t.TempDir(), "clone")
+		fetcher := &GoGitFetcher{}
+		if _, err := fetcher.Fetch(repoPath, cloneDir, "master"); err != nil {
+			t.Fatal(err)
+		}
+		dirtyPath := filepath.Join(cloneDir, "my-skill", "workflow.md")
+		if err := os.WriteFile(dirtyPath, []byte("local changes"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fetcher.Fetch(repoPath, cloneDir, "master"); err != nil {
+			t.Fatalf("unchanged fetch: %v", err)
+		}
+		content, err := os.ReadFile(dirtyPath)
+		if err != nil || string(content) != "local changes" {
+			t.Fatalf("dirty content = %q, error = %v", content, err)
+		}
+	})
+
+	t.Run("remote update", func(t *testing.T) {
+		repoPath := createTestRepoExec(t)
+		cloneDir := filepath.Join(t.TempDir(), "clone")
+		fetcher := &GoGitFetcher{}
+		if _, err := fetcher.Fetch(repoPath, cloneDir, "master"); err != nil {
+			t.Fatal(err)
+		}
+		dirtyPath := filepath.Join(cloneDir, "my-skill", "workflow.md")
+		if err := os.WriteFile(dirtyPath, []byte("local changes"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		beforeOutput, err := runGitOutput("-C", cloneDir, "rev-parse", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := string(bytes.TrimSpace(beforeOutput))
+
+		if err := os.WriteFile(filepath.Join(repoPath, "my-skill", "workflow.md"), []byte("remote changes"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		mustRunGit(t, "-C", repoPath, "add", ".")
+		mustRunGit(t, "-C", repoPath, "commit", "-m", "remote update")
+
+		_, err = fetcher.Fetch(repoPath, cloneDir, "master")
+		if err == nil || !strings.Contains(err.Error(), "cached worktree has local changes") {
+			t.Fatalf("fetch error = %v", err)
+		}
+		content, readErr := os.ReadFile(dirtyPath)
+		if readErr != nil || string(content) != "local changes" {
+			t.Fatalf("dirty content = %q, error = %v", content, readErr)
+		}
+		afterOutput, revErr := runGitOutput("-C", cloneDir, "rev-parse", "HEAD")
+		if revErr != nil || string(bytes.TrimSpace(afterOutput)) != before {
+			t.Fatalf("HEAD = %q, error = %v, want %q", bytes.TrimSpace(afterOutput), revErr, before)
+		}
+	})
 }
 
 func TestFetchConfiguredBranchAllowsLocalAhead(t *testing.T) {

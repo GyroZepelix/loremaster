@@ -107,6 +107,42 @@ func TestRunSyncReportsPartialSuccessBeforeError(t *testing.T) {
 	}
 }
 
+func TestSanitizedRepositorySource(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "authenticated HTTPS", source: "https://user:token@example.com/repo.git", want: "https://example.com/repo.git"},
+		{name: "username only", source: "https://deploy@example.com/repo.git", want: "https://example.com/repo.git"},
+		{name: "ordinary HTTPS", source: "https://example.com/repo.git", want: "https://example.com/repo.git"},
+		{name: "SSH username", source: "ssh://git@example.com/repo.git", want: "ssh://example.com/repo.git"},
+		{name: "scp style", source: "git@example.com:repo.git", want: "git@example.com:repo.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizedRepositorySource(tt.source); got != tt.want {
+				t.Fatalf("sanitized source = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderSyncSummaryRedactsCredentials(t *testing.T) {
+	var output bytes.Buffer
+	renderSyncSummary(&output, map[string]loregit.RepositoryUpdate{
+		"https://user:token@example.com/repo.git": {
+			Source:      "https://user:token@example.com/repo.git",
+			Status:      loregit.UpdateCloned,
+			AfterCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	}, nil)
+	want := "Repositories:\n  cloned https://example.com/repo.git @ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+	if got := output.String(); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
 func TestRenderSyncSummaryUnchanged(t *testing.T) {
 	var output bytes.Buffer
 	renderSyncSummary(&output, map[string]loregit.RepositoryUpdate{

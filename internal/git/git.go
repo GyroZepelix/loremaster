@@ -211,7 +211,9 @@ func checkoutFetchedGoGitRef(repo *gogit.Repository, ref string) (bool, error) {
 	}
 
 	targetHash := remote.Hash()
+	var previousLocal *plumbing.Reference
 	if local, err := repo.Reference(branchRef, true); err == nil {
+		previousLocal = local
 		localCommit, err := repo.CommitObject(local.Hash())
 		if err != nil {
 			return true, fmt.Errorf("resolve local ref %q: %w", ref, err)
@@ -234,19 +236,44 @@ func checkoutFetchedGoGitRef(repo *gogit.Repository, ref string) (bool, error) {
 			}
 			targetHash = local.Hash()
 		}
+		if targetHash == local.Hash() {
+			head, err := repo.Head()
+			if err != nil {
+				return true, fmt.Errorf("resolve HEAD before checkout ref %q: %w", ref, err)
+			}
+			if head.Name() == branchRef {
+				return true, nil
+			}
+		}
 	} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return true, fmt.Errorf("resolve local ref %q: %w", ref, err)
 	}
 
-	if err := repo.Storer.SetReference(plumbing.NewHashReference(branchRef, targetHash)); err != nil {
-		return true, fmt.Errorf("update local ref %q: %w", ref, err)
-	}
 	wt, err := repo.Worktree()
 	if err != nil {
 		return true, fmt.Errorf("get worktree: %w", err)
 	}
-	if err := wt.Checkout(&gogit.CheckoutOptions{Branch: branchRef, Force: true}); err != nil {
-		return true, fmt.Errorf("checkout ref %q: %w", ref, err)
+	status, err := wt.Status()
+	if err != nil {
+		return true, fmt.Errorf("inspect worktree before checkout ref %q: %w", ref, err)
+	}
+	if !status.IsClean() {
+		return true, fmt.Errorf("checkout ref %q: cached worktree has local changes", ref)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(branchRef, targetHash)); err != nil {
+		return true, fmt.Errorf("update local ref %q: %w", ref, err)
+	}
+	if err := wt.Checkout(&gogit.CheckoutOptions{Branch: branchRef}); err != nil {
+		var rollbackErr error
+		if previousLocal != nil {
+			rollbackErr = repo.Storer.SetReference(previousLocal)
+		} else {
+			rollbackErr = repo.Storer.RemoveReference(branchRef)
+		}
+		if rollbackErr != nil {
+			return true, fmt.Errorf("checkout ref %q: %v; restore local ref: %w", ref, err, rollbackErr)
+		}
+		return true, fmt.Errorf("checkout ref %q without discarding local changes: %w", ref, err)
 	}
 	return true, nil
 }

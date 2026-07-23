@@ -266,7 +266,7 @@ func (s *Syncer) syncItem(resource string, source config.SkillSource, entry conf
 	result.Items = append(result.Items, item)
 	if managed == nil {
 		result.ItemChanges = append(result.ItemChanges, ItemChange{Status: ItemAdded, Path: relPath})
-	} else if !destinationExisted || managedItemChanged(managed, item) || sourceIncludeChanged(s.SourceUpdates[source.Source], entry.Src, info.IsDir()) {
+	} else if !destinationExisted || managedItemChanged(managed, item) || (item.Mode == "soft" && sourceIncludeChanged(s.SourceUpdates[source.Source], entry.Src, info.IsDir())) {
 		result.ItemChanges = append(result.ItemChanges, ItemChange{Status: ItemUpdated, Path: relPath})
 	}
 	for _, change := range conflictChanges {

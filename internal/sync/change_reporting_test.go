@@ -74,6 +74,47 @@ func TestSyncReportsSemanticItemChanges(t *testing.T) {
 		second := runChangeSync(t, project, prov, mf, cfg, source, sourceDir, nil)
 		assertItemChanges(t, second.ItemChanges, ItemChange{Status: ItemUpdated, Path: ".claude/skills/review"})
 	})
+
+	t.Run("hard ignored symlink change", func(t *testing.T) {
+		project := t.TempDir()
+		sourceDir := t.TempDir()
+		skillDir := filepath.Join(sourceDir, "review")
+		if err := os.Mkdir(skillDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "workflow.md"), []byte("content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "target-a"), []byte("a"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "target-b"), []byte("b"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		ignored := filepath.Join(skillDir, "ignored")
+		if err := os.Symlink("target-a", ignored); err != nil {
+			t.Fatal(err)
+		}
+		source := "git@example.com:resources.git"
+		cfg := skillChangeConfig(source, "hard")
+		prov, _ := provider.Get("claude")
+		mf := manifest.New()
+
+		first := runChangeSync(t, project, prov, mf, cfg, source, sourceDir, nil)
+		mf.SetProfileItems("default", first.Items)
+		if err := os.Remove(ignored); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("target-b", ignored); err != nil {
+			t.Fatal(err)
+		}
+		updates := map[string]loregit.RepositoryUpdate{source: {ChangedPaths: []string{"review/ignored"}}}
+		second := runChangeSync(t, project, prov, mf, cfg, source, sourceDir, updates)
+		assertItemChanges(t, second.ItemChanges)
+		if _, err := os.Lstat(filepath.Join(project, ".claude", "skills", "review", "ignored")); !os.IsNotExist(err) {
+			t.Fatalf("ignored symlink was copied: %v", err)
+		}
+	})
 }
 
 func TestSourceIncludeChanged(t *testing.T) {
